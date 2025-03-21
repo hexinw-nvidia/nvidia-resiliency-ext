@@ -1,27 +1,31 @@
 # NVIDIA Resiliency Extension
+**[|Documentation|](https://nvidia.github.io/nvidia-resiliency-ext/)**
 
 The NVIDIA Resiliency Extension (NVRx) integrates multiple resiliency-focused solutions for PyTorch-based workloads.
 
+<img src="/docs/source/media/NVRx-Core-Features.png" alt="Figure highlighting core NVRx features including automatic restart, hierarchical checkpointing, fault detection and health checks" width="800" height="600">
+
+
 ## Core Components and Capabilities
 
-- **Fault Tolerance**
+- **[Fault Tolerance](https://gitlab-master.nvidia.com/dl/osiris/nvidia_resiliency_ext/-/tree/main/docs/source/fault_tolerance?ref_type=heads)**
   - Detection of hung ranks.  
   - Restarting training in-job, without the need to reallocate SLURM nodes.
 
-- **In-Process Restarting**
+- **[In-Process Restarting](https://gitlab-master.nvidia.com/dl/osiris/nvidia_resiliency_ext/-/tree/anjshah/doc_updates/docs/source/inprocess?ref_type=heads)**
   - Detecting failures and enabling quick recovery.
 
-- **Async Checkpointing**
+- **[Async Checkpointing](https://gitlab-master.nvidia.com/dl/osiris/nvidia_resiliency_ext/-/tree/anjshah/doc_updates/docs/source/checkpointing/async?ref_type=heads)**
   - Providing an efficient framework for asynchronous checkpointing.
 
-- **Local Checkpointing**
+- **[Local Checkpointing](https://gitlab-master.nvidia.com/dl/osiris/nvidia_resiliency_ext/-/tree/anjshah/doc_updates/docs/source/checkpointing/local?ref_type=heads)**
   - Providing an efficient framework for local checkpointing.
 
-- **Straggler Detection**
+- **[Straggler Detection](https://gitlab-master.nvidia.com/dl/osiris/nvidia_resiliency_ext/-/tree/anjshah/doc_updates/docs/source/straggler_det?ref_type=heads)**
   - Monitoring GPU and CPU performance of ranks.  
   - Identifying slower ranks that may impede overall training efficiency.
 
-- **PyTorch Lightning Callbacks**
+- **[PyTorch Lightning Callbacks](https://gitlab-master.nvidia.com/dl/osiris/nvidia_resiliency_ext/-/blob/anjshah/doc_updates/docs/source/fault_tolerance/integration/ptl.rst)**
   - Facilitating seamless NVRx integration with PyTorch Lightning.
 
 ## Installation
@@ -49,4 +53,4 @@ The NVIDIA Resiliency Extension (NVRx) integrates multiple resiliency-focused so
 
 ## Usage
 
-For detailed documentation and usage information about each component, please refer to the https://nvidia.github.io/nvidia-resiliency-ext/.
+For detailed documentation and usage information about each component, please refer to the [./docs](./docs).
