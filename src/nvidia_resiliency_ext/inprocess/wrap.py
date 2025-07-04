@@ -28,6 +28,13 @@ import weakref
 from datetime import timedelta
 from typing import Any, Optional
 
+# Try to import objgraph, but don't fail if it's not available
+try:
+    import objgraph
+    OBJGRAPH_AVAILABLE = True
+except ImportError:
+    OBJGRAPH_AVAILABLE = False
+
 import torch
 
 from . import param_utils, utils
@@ -552,6 +559,23 @@ class CallWrapper:
                                                 # If ref count is high, try to find what's holding the reference
                                                 if ref_count > 10 and caught_exception:
                                                     log.warning(f"[DEBUG] High ref count ({ref_count}) for DDP model - checking referrers")
+
+                                                    # Only use objgraph if it's available
+                                                    if OBJGRAPH_AVAILABLE:
+                                                        filename = f"ddp_backref_{id(obj)}.png"
+                                                        try:
+                                                            objgraph.show_backrefs(
+                                                                [obj],
+                                                                max_depth=5,
+                                                                filename=filename,
+                                                                highlight=lambda x: isinstance(x, torch.nn.Module),
+                                                                too_many=10,
+                                                            )
+                                                        except Exception as e:
+                                                            log.warning(f"[DEBUG] Failed to generate objgraph: {e}")
+                                                    else:
+                                                        log.warning(f"[DEBUG] objgraph not available - skipping backref generation")
+
                                                     try:
                                                         referrers = gc.get_referrers(obj)
                                                         log.warning(f"[DEBUG] DDP model has {len(referrers)} referrers")
