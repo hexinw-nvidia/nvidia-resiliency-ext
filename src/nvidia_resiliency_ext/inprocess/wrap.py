@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 import warnings
+import weakref
 from datetime import timedelta
 from typing import Any, Optional
 
@@ -429,6 +430,7 @@ class CallWrapper:
                     kwargs,
                     {
                         CallWrapper: self,
+#                        CallWrapper: weakref.proxy(self),
                     },
                 )
 
@@ -463,8 +465,109 @@ class CallWrapper:
                                 raise HealthCheckError from health_ex
 
                             if state.mode == Mode.ACTIVE:
-                                ret = fn(*args, **kwargs)
-                                store.record_completed()
+                                # Debug: Print reference counts before function call
+                                log.info(f"[DEBUG] Before function call - iteration {state.iteration}")
+                                if torch.cuda.is_available():
+                                    log.info(f"[DEBUG] CUDA memory before: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+
+                                # Track model reference count before function call
+                                model_refs_before = {}
+                                for obj in gc.get_objects():
+                                    try:
+                                        if hasattr(obj, '__class__') and obj.__class__.__name__ == 'DistributedDataParallel':
+                                            model_refs_before[id(obj)] = sys.getrefcount(obj)
+                                            log.info(f"[DEBUG] Found DDP model before call: {obj.__class__.__name__} (id={id(obj)}) ref count: {sys.getrefcount(obj)}")
+                                    except (ReferenceError, AttributeError):
+                                        # Skip objects that are no longer accessible
+                                        continue
+
+                                # Use try-except-finally to ensure cleanup and proper exception handling
+                                caught_exception = None
+                                fn_locals = None
+                                try:
+                                    ret = fn(*args, **kwargs)
+                                    store.record_completed()
+                                except Exception as e:
+                                    # Clear references
+                                    e = None
+                                    del e
+                                    import sys
+                                    sys.exc_info = lambda: (None, None, None)
+                                    caught_exception = True
+                                finally:
+                                    # Always clean up memory, regardless of success or exception
+                                    if caught_exception:
+                                        log.info(f"[DEBUG] Exception occurred - cleaning up memory in finally block")
+
+                                        # Clear the exception's traceback to break references to local variables
+                                        if hasattr(caught_exception, '__traceback__'):
+                                            pass
+                                            # caught_exception.__traceback__ = None
+
+                                        # Clear any references that might be held by the exception handling
+                                        import sys
+                                        if hasattr(sys, 'exc_info'):
+                                            exc_type, exc_value, exc_traceback = sys.exc_info()
+                                            if exc_traceback:
+                                                # Clear the traceback to break references
+                                                exc_traceback = None
+                                    else:
+                                        log.info(f"[DEBUG] Function completed successfully - cleaning up memory in finally block")
+
+                                    # Force cleanup of function locals immediately after function call
+                                    if caught_exception:
+                                        # For exceptions, try to force frame cleanup
+                                        import sys
+                                        try:
+                                            # Clear any references that might be held
+                                            if 'frame' in locals():
+                                                del locals()['frame']
+                                            if 'fn_locals' in locals():
+                                                del locals()['fn_locals']
+                                        except:
+                                            pass
+
+                                    for _ in range(5):  # More aggressive GC for exception cases
+                                        gc.collect()
+
+                                    if torch.cuda.is_available():
+                                        torch.cuda.empty_cache()
+                                        torch.cuda.synchronize()
+
+                                    # Final cleanup
+                                    gc.collect()
+                                    if torch.cuda.is_available():
+                                        torch.cuda.empty_cache()
+                                        log.info(f"[DEBUG] CUDA memory after finally cleanup: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+
+                                    # Check if DDP models are still around after cleanup
+                                    ddp_count = 0
+                                    for obj in gc.get_objects():
+                                        try:
+                                            if hasattr(obj, '__class__') and obj.__class__.__name__ == 'DistributedDataParallel':
+                                                ddp_count += 1
+                                                ref_count = sys.getrefcount(obj)
+                                                log.info(f"[DEBUG] DDP model still exists after finally cleanup: {obj.__class__.__name__} (id={id(obj)}) ref count: {ref_count}")
+
+                                                # If ref count is high, try to find what's holding the reference
+                                                if ref_count > 10 and caught_exception:
+                                                    log.warning(f"[DEBUG] High ref count ({ref_count}) for DDP model - checking referrers")
+                                                    try:
+                                                        referrers = gc.get_referrers(obj)
+                                                        log.warning(f"[DEBUG] DDP model has {len(referrers)} referrers")
+                                                        for i, referrer in enumerate(referrers[:5]):  # Show first 5 referrers
+                                                            log.warning(f"[DEBUG] Referrer {i}: {type(referrer).__name__} (id={id(referrer)})")
+                                                    except:
+                                                        pass
+                                        except (ReferenceError, AttributeError):
+                                            continue
+
+                                    if ddp_count > 0:
+                                        log.warning(f"[DEBUG] {ddp_count} DDP models still exist after finally cleanup")
+                                    else:
+                                        log.info(f"[DEBUG] All DDP models cleaned up after finally block")
+
+
                             elif state.mode == Mode.INACTIVE:
                                 ret = reserve_fn(
                                     state,
@@ -485,6 +588,10 @@ class CallWrapper:
                         except Exception as fn_ex:
                             try:
                                 log.error(log_exc(state, fn_ex, 'fn_ex'))
+
+                                # Memory cleanup already happened in the finally block above
+                                # No need for additional cleanup here
+
                                 monitor_process.record_interrupted(
                                     [InterruptionRecord(state.rank, Interruption.EXCEPTION)]
                                 )
