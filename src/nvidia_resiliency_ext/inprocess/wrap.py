@@ -485,6 +485,7 @@ class CallWrapper:
                         except Exception as fn_ex:
                             try:
                                 log.error(log_exc(state, fn_ex, 'fn_ex'))
+                                fn_ex = None
                                 monitor_process.record_interrupted(
                                     [InterruptionRecord(state.rank, Interruption.EXCEPTION)]
                                 )
@@ -493,12 +494,12 @@ class CallWrapper:
                             except RankShouldRestart as async_ex:
                                 log.debug(log_exc(state, async_ex, 'async_ex'))
                                 monitor_thread.shutdown()
-                                raise async_ex from fn_ex
+                                raise async_ex
                             except Exception as other_ex:
                                 log.critical(log_exc(state, other_ex, 'other_ex'))
                                 raise InternalError(f'{state}') from other_ex
                             else:
-                                raise InternalError(f'{state}') from fn_ex
+                                raise InternalError(f'{state}')
                     except RankShouldRestart as term_ex:
                         log.warning(log_exc(state, term_ex, 'term_ex'))
                         monitor_thread.shutdown()
@@ -552,6 +553,8 @@ class CallWrapper:
                 finally:
                     while gc.collect():
                         pass
+                    torch.cuda.empty_cache()
+                    log.info(f"[DEBUG] CUDA memory after finally cleanup: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
 
                 state.advance()
 
