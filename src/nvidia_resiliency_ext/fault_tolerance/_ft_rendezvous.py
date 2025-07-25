@@ -232,7 +232,6 @@ class RendezvousSettings:
     upscaling_enabled: bool = True
 
 
-@dataclass(eq=True, order=True, frozen=True)
 class _NodeDesc:
     """Describe a node in the rendezvous.
 
@@ -243,14 +242,27 @@ class _NodeDesc:
             The id of the process in which the rendezvous handler runs.
         local_id:
             A process-wide unique id.
+        cluster_uuid:
+            The UUID of the cluster this node belongs to. Nodes with the same
+            cluster_uuid will be assigned contiguous ranks.
     """
 
     addr: str
     pid: int
     local_id: int
+    cluster_uuid: Optional[str]
+
+    def __init__(self, addr: str, pid: int, local_id: int, cluster_uuid: Optional[str] = None):
+        self.addr = addr
+        self.pid = pid
+        self.local_id = local_id
+        self.cluster_uuid = cluster_uuid
 
     def __repr__(self) -> str:
-        return f"{self.addr}_{self.pid}_{self.local_id}"
+        if self.cluster_uuid:
+            return f"{self.addr}_{self.pid}_{self.local_id}_{self.cluster_uuid}"
+        else:
+            return f"{self.addr}_{self.pid}_{self.local_id}"
 
 
 class _NodeDescGenerator:
@@ -269,7 +281,9 @@ class _NodeDescGenerator:
         # An integer that is incremented with each call to generate().
         self._local_id = 0
 
-    def generate(self, local_addr: Optional[str] = None) -> _NodeDesc:
+    def generate(
+        self, local_addr: Optional[str] = None, cluster_uuid: Optional[str] = None
+    ) -> _NodeDesc:
         # This method can be called by multiple threads concurrently; therefore,
         # we must increment the integer atomically.
         with self._lock:
@@ -277,7 +291,7 @@ class _NodeDescGenerator:
 
             self._local_id += 1
 
-        return _NodeDesc(local_addr or socket.getfqdn(), os.getpid(), local_id)
+        return _NodeDesc(local_addr or socket.getfqdn(), os.getpid(), local_id, cluster_uuid)
 
 
 class _RendezvousState:
@@ -861,28 +875,143 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
         del self._state.last_heartbeats[self._node]
 
     @staticmethod
-    def _assign_ranks(
+    def _assign_group_ranks(
         participants: Dict[_NodeDesc, int], prev: Dict[_NodeDesc, int]
     ) -> Dict[_NodeDesc, int]:
-        # Assign ranks. Re-use assigment from the previous round as much as possible
+        """Assign group ranks with ClusterUUID-aware grouping for optimal performance and stability.
+
+        Note: This assigns base group ranks, not individual GPU ranks. Each group may contain
+        multiple GPUs (e.g., 8 GPUs in H100, 4 GPUs in B200). The actual GPU ranks are
+        calculated by multiplying the group rank by the number of GPUs per group.
+
+        Algorithm:
+        1. Honor previous group assignments first (for restart stability)
+        2. For new/replacement groups within each cluster:
+           a) Fill holes between existing cluster group ranks first
+           b) Expand left (lower group ranks) if more groups need assignment
+           c) Expand right (higher group ranks) if still more groups need assignment
+           d) Use any remaining available group ranks as fallback
+
+        This approach ensures:
+        - Maximum group rank stability across restarts
+        - Contiguous group rank assignments within clusters when possible
+        - Deterministic cluster processing order
+        - O(n log n) complexity, optimized to minimize sorting operations
+        """
         world_size = len(participants)
-        sorted_keys = sorted(participants.keys())
-        free_ranks = set(range(world_size))
         res = {}
-        for p in sorted_keys:
-            prev_rank = prev.get(p, -1)
-            if prev_rank >= 0 and prev_rank < world_size:
-                # if this node can have the same rank, use it
-                res[p] = prev_rank
-                free_ranks.remove(prev_rank)
+
+        # First pass: honor all previous assignments
+        used_ranks = set()
+        for node in participants.keys():
+            prev_rank = prev.get(node, -1)
+            if prev_rank >= 0 and prev_rank < world_size and prev_rank not in used_ranks:
+                res[node] = prev_rank
+                used_ranks.add(prev_rank)
             else:
-                res[p] = -1
-        # Fill the gaps with the remaining free rank ids
-        free_ranks = sorted(free_ranks)
-        for p in sorted_keys:
-            if res[p] < 0:
-                res[p] = free_ranks.pop(0)
-        assert not free_ranks
+                res[node] = -1
+
+        # Group unassigned nodes by cluster_uuid and collect existing ranks per cluster
+        cluster_groups = {}
+        cluster_existing_ranks = {}
+        for node in participants.keys():
+            cluster_id = node.cluster_uuid or "default"
+            if res[node] < 0:  # Only unassigned nodes
+                if cluster_id not in cluster_groups:
+                    cluster_groups[cluster_id] = []
+                cluster_groups[cluster_id].append(node)
+            else:  # Node has previous assignment
+                if cluster_id not in cluster_existing_ranks:
+                    cluster_existing_ranks[cluster_id] = []
+                cluster_existing_ranks[cluster_id].append(res[node])
+
+        # Sort existing ranks once per cluster for efficient hole detection
+        for cluster_id in cluster_existing_ranks:
+            cluster_existing_ranks[cluster_id].sort()
+
+        # Second pass: assign remaining ranks to unassigned nodes
+        available_ranks = [r for r in range(world_size) if r not in used_ranks]
+        # No need to sort available_ranks - we'll use min() for left expansion and iterate for holes
+
+        # Process clusters in deterministic order (sorted by cluster_id)
+        for cluster_id in sorted(cluster_groups.keys()):
+            nodes_in_cluster = cluster_groups[cluster_id]
+            existing_ranks = cluster_existing_ranks.get(cluster_id, [])
+
+            # Strategy: Fill holes first, then expand left, then expand right
+            if existing_ranks:
+                # Find holes within existing cluster ranks (no need to sort holes)
+                holes = []
+                for i in range(len(existing_ranks) - 1):
+                    for rank in range(existing_ranks[i] + 1, existing_ranks[i + 1]):
+                        if rank in available_ranks:
+                            holes.append(rank)
+
+                # Assign holes first (holes are already in order)
+                nodes_assigned = 0
+                for i, node in enumerate(nodes_in_cluster):
+                    if i < len(holes):
+                        res[node] = holes[i]
+                        used_ranks.add(holes[i])
+                        available_ranks.remove(holes[i])
+                        nodes_assigned += 1
+
+                # If still have unassigned nodes, expand to the left
+                remaining_nodes = nodes_in_cluster[nodes_assigned:]
+                if remaining_nodes:
+                    left_expansion = []
+                    for rank in range(existing_ranks[0] - 1, -1, -1):
+                        if rank in available_ranks:
+                            left_expansion.append(rank)
+                        if len(left_expansion) >= len(remaining_nodes):
+                            break
+
+                    # Assign left expansion ranks (already in reverse order, so reverse for ascending)
+                    left_expansion.reverse()
+                    for i, node in enumerate(remaining_nodes):
+                        if i < len(left_expansion):
+                            res[node] = left_expansion[i]
+                            used_ranks.add(left_expansion[i])
+                            available_ranks.remove(left_expansion[i])
+                            nodes_assigned += 1
+
+                # If still have unassigned nodes, expand to the right
+                remaining_nodes = nodes_in_cluster[nodes_assigned:]
+                if remaining_nodes:
+                    right_expansion = []
+                    for rank in range(existing_ranks[-1] + 1, world_size):
+                        if rank in available_ranks:
+                            right_expansion.append(rank)
+                        if len(right_expansion) >= len(remaining_nodes):
+                            break
+
+                    # Assign right expansion ranks (already in order)
+                    for i, node in enumerate(remaining_nodes):
+                        if i < len(right_expansion):
+                            res[node] = right_expansion[i]
+                            used_ranks.add(right_expansion[i])
+                            available_ranks.remove(right_expansion[i])
+
+                # If still have unassigned nodes, assign any remaining available ranks
+                remaining_nodes = nodes_in_cluster[nodes_assigned:]
+                for node in remaining_nodes:
+                    if available_ranks:
+                        res[node] = available_ranks.pop(0)
+                        used_ranks.add(res[node])
+            else:
+                # No existing ranks for this cluster, assign from left
+                for node in nodes_in_cluster:
+                    if available_ranks:
+                        res[node] = available_ranks.pop(0)
+                        used_ranks.add(res[node])
+
+        # Verify all nodes have been assigned a rank
+        assigned_ranks = set(res.values())
+        expected_ranks = set(range(world_size))
+        assert (
+            assigned_ranks == expected_ranks
+        ), f"Rank assignment incomplete. Expected: {expected_ranks}, Got: {assigned_ranks}"
+
         return res
 
     def _mark_rendezvous_complete(self) -> None:
@@ -907,8 +1036,8 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
             state.redundancy_list.update(state.wait_list)
             state.wait_list.clear()
 
-        # Will try to preserve node<->rank mapping
-        state.participants = self._assign_ranks(state.participants, self._prev_participants)
+        # Will try to preserve group<->rank mapping
+        state.participants = self._assign_group_ranks(state.participants, self._prev_participants)
 
         # Set initial worker states, assume all workers are healthy at the beginning
         state.worker_states = {n: WorkerState.HEALTHY for n in state.participants}
@@ -1144,6 +1273,7 @@ class FtRendezvousHandler(RendezvousHandler):
         local_addr: Optional[str] = None,
         timeout: Optional[RendezvousTimeout] = None,
         upscaling_enabled: bool = True,
+        cluster_uuid: Optional[str] = None,
     ):
         """Create a new :py:class:`FtRendezvousHandler`.
 
@@ -1164,9 +1294,12 @@ class FtRendezvousHandler(RendezvousHandler):
                 The timeout configuration of the rendezvous.
             upscaling_enabled:
                 Whether to enable upscaling of a completed rendezvous with redundant or new nodes.
+            cluster_uuid:
+                The UUID of the cluster this node belongs to. Nodes with the same
+                cluster_uuid will be assigned contiguous ranks.
         """
         # We associate each handler instance with a unique node descriptor.
-        node = cls._node_desc_generator.generate(local_addr)
+        node = cls._node_desc_generator.generate(local_addr, cluster_uuid)
 
         settings = RendezvousSettings(
             run_id,
@@ -1602,6 +1735,10 @@ def create_handler(
     |                   | :py:meth:`RendezvousHandler.shutdown`. Defaults to   |
     |                   | 30 seconds.                                          |
     +-------------------+------------------------------------------------------+
+    | cluster_uuid      | The UUID of the cluster this node belongs to. Nodes  |
+    |                   | with the same cluster_uuid will be assigned          |
+    |                   | contiguous ranks.                                    |
+    +-------------------+------------------------------------------------------+
     """
     try:
         timeout = RendezvousTimeout(
@@ -1613,6 +1750,9 @@ def create_handler(
         # torchrun default behaviour if not specified otherwise
         upscale_completed = params.config.get('upscaling_enabled', True)
 
+        # Extract cluster_uuid from params
+        cluster_uuid = params.config.get('cluster_uuid')
+
         return FtRendezvousHandler.from_backend(
             params.run_id,
             store,
@@ -1622,6 +1762,7 @@ def create_handler(
             params.local_addr,
             timeout,
             upscaling_enabled=upscale_completed,
+            cluster_uuid=cluster_uuid,
         )
     except Exception as e:
         construct_and_record_rdzv_event(

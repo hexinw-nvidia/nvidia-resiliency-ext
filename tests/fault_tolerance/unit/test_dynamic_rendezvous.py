@@ -2256,3 +2256,340 @@ class IntegrationTest(TestCase):
             handler1.get_worker_states(),
             {node2: WorkerState.HEALTHY, node3: WorkerState.HEALTHY},
         )
+
+
+class TestAssignGroupRanks(TestCase):
+    """Test cases for _assign_group_ranks function."""
+
+    def setUp(self):
+        """Set up test nodes."""
+        self.nodes = [
+            _NodeDesc("node1.example.com", 12345, 0, "cluster-a"),
+            _NodeDesc("node2.example.com", 67890, 0, "cluster-a"),
+            _NodeDesc("node3.example.com", 11111, 0, "cluster-a"),
+            _NodeDesc("node4.example.com", 22222, 0, "cluster-b"),
+            _NodeDesc("node5.example.com", 33333, 0, "cluster-b"),
+            _NodeDesc("node6.example.com", 44444, 0, None),  # No cluster UUID
+            _NodeDesc("node7.example.com", 55555, 0, "cluster-c"),
+        ]
+
+    def test_first_start_no_previous_assignments(self):
+        """Test first start scenario with no previous assignments."""
+        participants = {node: -1 for node in self.nodes}
+        prev_participants = {}
+
+        result = _DistributedRendezvousOpExecutor._assign_group_ranks(
+            participants, prev_participants
+        )
+
+        # Verify all nodes got assigned ranks
+        self.assertEqual(len(result), len(self.nodes))
+        self.assertEqual(set(result.values()), set(range(len(self.nodes))))
+
+        # Verify cluster-a nodes got contiguous ranks starting from 0
+        cluster_a_nodes = [n for n in self.nodes if n.cluster_uuid == "cluster-a"]
+        cluster_a_ranks = [result[n] for n in cluster_a_nodes]
+        cluster_a_ranks.sort()
+        self.assertEqual(cluster_a_ranks, [0, 1, 2])
+
+        # Verify cluster-b nodes got contiguous ranks
+        cluster_b_nodes = [n for n in self.nodes if n.cluster_uuid == "cluster-b"]
+        cluster_b_ranks = [result[n] for n in cluster_b_nodes]
+        cluster_b_ranks.sort()
+        self.assertEqual(cluster_b_ranks, [3, 4])
+
+        # Verify default cluster (no UUID) got next rank
+        default_nodes = [n for n in self.nodes if n.cluster_uuid is None]
+        default_ranks = [result[n] for n in default_nodes]
+        self.assertEqual(default_ranks, [5])
+
+        # Verify cluster-c got next rank
+        cluster_c_nodes = [n for n in self.nodes if n.cluster_uuid == "cluster-c"]
+        cluster_c_ranks = [result[n] for n in cluster_c_nodes]
+        self.assertEqual(cluster_c_ranks, [6])
+
+    def test_restart_with_all_nodes_same(self):
+        """Test restart scenario where all nodes are the same."""
+        participants = {node: -1 for node in self.nodes}
+        prev_participants = {
+            self.nodes[0]: 0,  # cluster-a
+            self.nodes[1]: 1,  # cluster-a
+            self.nodes[2]: 2,  # cluster-a
+            self.nodes[3]: 3,  # cluster-b
+            self.nodes[4]: 4,  # cluster-b
+            self.nodes[5]: 5,  # default
+            self.nodes[6]: 6,  # cluster-c
+        }
+
+        result = _DistributedRendezvousOpExecutor._assign_group_ranks(
+            participants, prev_participants
+        )
+
+        # Verify all previous assignments are preserved
+        for node, prev_rank in prev_participants.items():
+            self.assertEqual(result[node], prev_rank)
+
+    def test_restart_with_node_replacement(self):
+        """Test restart scenario with one node replaced."""
+        # Remove one node and add a replacement
+        original_nodes = self.nodes[:-1]  # Remove last node
+        replacement_node = _NodeDesc("node8.example.com", 66666, 0, "cluster-a")
+        current_nodes = original_nodes + [replacement_node]
+
+        participants = {node: -1 for node in current_nodes}
+        prev_participants = {
+            self.nodes[0]: 0,  # cluster-a
+            self.nodes[1]: 1,  # cluster-a
+            self.nodes[2]: 2,  # cluster-a
+            self.nodes[3]: 3,  # cluster-b
+            self.nodes[4]: 4,  # cluster-b
+            self.nodes[5]: 5,  # default
+            # nodes[6] is replaced
+        }
+
+        result = _DistributedRendezvousOpExecutor._assign_group_ranks(
+            participants, prev_participants
+        )
+
+        # Verify previous assignments are preserved
+        for node, prev_rank in prev_participants.items():
+            if node in current_nodes:
+                self.assertEqual(result[node], prev_rank)
+
+        # Verify replacement node gets a rank
+        self.assertIn(replacement_node, result)
+        self.assertGreaterEqual(result[replacement_node], 0)
+
+        # Verify all ranks are unique
+        self.assertEqual(len(result), len(set(result.values())))
+
+    def test_hole_filling_scenario(self):
+        """Test scenario where there are holes to fill."""
+        participants = {node: -1 for node in self.nodes}
+        prev_participants = {
+            self.nodes[0]: 0,  # cluster-a
+            self.nodes[1]: 2,  # cluster-a (hole at rank 1)
+            self.nodes[2]: 4,  # cluster-a (hole at rank 3)
+            self.nodes[3]: 6,  # cluster-b
+            self.nodes[4]: 7,  # cluster-b
+            self.nodes[5]: 8,  # default
+            self.nodes[6]: 9,  # cluster-c
+        }
+
+        result = _DistributedRendezvousOpExecutor._assign_group_ranks(
+            participants, prev_participants
+        )
+
+        # Verify previous assignments are preserved
+        for node, prev_rank in prev_participants.items():
+            self.assertEqual(result[node], prev_rank)
+
+        # Verify all ranks are assigned
+        self.assertEqual(len(result), len(self.nodes))
+        self.assertEqual(set(result.values()), set(range(len(self.nodes))))
+
+    def test_multiple_replacements_same_cluster(self):
+        """Test multiple node replacements in the same cluster."""
+        # Replace 2 nodes in cluster-a
+        replacement1 = _NodeDesc("node8.example.com", 66666, 0, "cluster-a")
+        replacement2 = _NodeDesc("node9.example.com", 77777, 0, "cluster-a")
+        current_nodes = [
+            self.nodes[0],
+            replacement1,
+            replacement2,
+            self.nodes[3],
+            self.nodes[4],
+            self.nodes[5],
+            self.nodes[6],
+        ]
+
+        participants = {node: -1 for node in current_nodes}
+        prev_participants = {
+            self.nodes[0]: 0,  # cluster-a (survived)
+            # nodes[1] and nodes[2] replaced
+            self.nodes[3]: 3,  # cluster-b
+            self.nodes[4]: 4,  # cluster-b
+            self.nodes[5]: 5,  # default
+            self.nodes[6]: 6,  # cluster-c
+        }
+
+        result = _DistributedRendezvousOpExecutor._assign_group_ranks(
+            participants, prev_participants
+        )
+
+        # Verify previous assignments are preserved
+        for node, prev_rank in prev_participants.items():
+            if node in current_nodes:
+                self.assertEqual(result[node], prev_rank)
+
+        # Verify replacement nodes get ranks
+        self.assertIn(replacement1, result)
+        self.assertIn(replacement2, result)
+
+        # Verify cluster-a ranks are as contiguous as possible
+        cluster_a_nodes = [n for n in current_nodes if n.cluster_uuid == "cluster-a"]
+        cluster_a_ranks = [result[n] for n in cluster_a_nodes]
+        cluster_a_ranks.sort()
+
+        # Should try to fill holes first, then expand
+        # Original: [0, 1, 2], now: [0, ?, ?] where ? should be 1, 2 if available
+        self.assertEqual(len(cluster_a_ranks), 3)
+        self.assertEqual(cluster_a_ranks[0], 0)  # Preserved rank
+
+    def test_deterministic_ordering(self):
+        """Test that the algorithm produces deterministic results."""
+        participants = {node: -1 for node in self.nodes}
+        prev_participants = {
+            self.nodes[0]: 0,
+            self.nodes[1]: 1,
+            self.nodes[2]: 2,
+        }
+
+        # Run multiple times
+        result1 = _DistributedRendezvousOpExecutor._assign_group_ranks(
+            participants, prev_participants
+        )
+        result2 = _DistributedRendezvousOpExecutor._assign_group_ranks(
+            participants, prev_participants
+        )
+
+        # Results should be identical
+        self.assertEqual(result1, result2)
+
+    def test_edge_case_empty_participants(self):
+        """Test edge case with empty participants."""
+        participants = {}
+        prev_participants = {}
+
+        result = _DistributedRendezvousOpExecutor._assign_group_ranks(
+            participants, prev_participants
+        )
+
+        self.assertEqual(result, {})
+
+    def test_edge_case_single_node(self):
+        """Test edge case with single node."""
+        single_node = self.nodes[0]
+        participants = {single_node: -1}
+        prev_participants = {}
+
+        result = _DistributedRendezvousOpExecutor._assign_group_ranks(
+            participants, prev_participants
+        )
+
+        self.assertEqual(result, {single_node: 0})
+
+    def test_edge_case_all_previous_assignments(self):
+        """Test edge case where all nodes have previous assignments."""
+        participants = {node: -1 for node in self.nodes}
+        prev_participants = {node: i for i, node in enumerate(self.nodes)}
+
+        result = _DistributedRendezvousOpExecutor._assign_group_ranks(
+            participants, prev_participants
+        )
+
+        # All previous assignments should be preserved
+        for node, prev_rank in prev_participants.items():
+            self.assertEqual(result[node], prev_rank)
+
+    def test_cluster_ordering_deterministic(self):
+        """Test that cluster processing order is deterministic."""
+        # Create nodes with different cluster UUIDs in different order
+        nodes_ordered = [
+            _NodeDesc("node1.example.com", 12345, 0, "cluster-z"),
+            _NodeDesc("node2.example.com", 67890, 0, "cluster-a"),
+            _NodeDesc("node3.example.com", 11111, 0, "cluster-m"),
+        ]
+
+        participants = {node: -1 for node in nodes_ordered}
+        prev_participants = {}
+
+        result = _DistributedRendezvousOpExecutor._assign_group_ranks(
+            participants, prev_participants
+        )
+
+        # Clusters should be processed in alphabetical order: a, m, z
+        # So cluster-a should get ranks 0, cluster-m should get rank 1, cluster-z should get rank 2
+        cluster_a_node = nodes_ordered[1]
+        cluster_m_node = nodes_ordered[2]
+        cluster_z_node = nodes_ordered[0]
+
+        self.assertEqual(result[cluster_a_node], 0)
+        self.assertEqual(result[cluster_m_node], 1)
+        self.assertEqual(result[cluster_z_node], 2)
+
+    def test_left_expansion_scenario(self):
+        """Test scenario where nodes expand to the left of existing cluster ranks."""
+        participants = {node: -1 for node in self.nodes}
+        prev_participants = {
+            self.nodes[0]: 2,  # cluster-a (existing rank)
+            self.nodes[1]: 3,  # cluster-a (existing rank)
+            self.nodes[2]: 4,  # cluster-a (existing rank)
+            self.nodes[3]: 6,  # cluster-b
+            self.nodes[4]: 7,  # cluster-b
+            self.nodes[5]: 8,  # default
+            self.nodes[6]: 9,  # cluster-c
+        }
+
+        result = _DistributedRendezvousOpExecutor._assign_group_ranks(
+            participants, prev_participants
+        )
+
+        # Verify previous assignments are preserved
+        for node, prev_rank in prev_participants.items():
+            self.assertEqual(result[node], prev_rank)
+
+        # Verify all ranks are assigned
+        self.assertEqual(len(result), len(self.nodes))
+        self.assertEqual(set(result.values()), set(range(len(self.nodes))))
+
+    def test_right_expansion_scenario(self):
+        """Test scenario where nodes expand to the right of existing cluster ranks."""
+        participants = {node: -1 for node in self.nodes}
+        prev_participants = {
+            self.nodes[0]: 0,  # cluster-a (existing rank)
+            self.nodes[1]: 1,  # cluster-a (existing rank)
+            self.nodes[2]: 2,  # cluster-a (existing rank)
+            self.nodes[3]: 4,  # cluster-b
+            self.nodes[4]: 5,  # cluster-b
+            self.nodes[5]: 6,  # default
+            self.nodes[6]: 7,  # cluster-c
+        }
+
+        result = _DistributedRendezvousOpExecutor._assign_group_ranks(
+            participants, prev_participants
+        )
+
+        # Verify previous assignments are preserved
+        for node, prev_rank in prev_participants.items():
+            self.assertEqual(result[node], prev_rank)
+
+        # Verify all ranks are assigned
+        self.assertEqual(len(result), len(self.nodes))
+        self.assertEqual(set(result.values()), set(range(len(self.nodes))))
+
+    def test_mixed_expansion_scenario(self):
+        """Test scenario with mixed hole filling and expansion."""
+        # Create a scenario where some holes are filled and some expansion happens
+        participants = {node: -1 for node in self.nodes}
+        prev_participants = {
+            self.nodes[0]: 0,  # cluster-a (existing rank)
+            self.nodes[1]: 2,  # cluster-a (hole at rank 1)
+            self.nodes[2]: 5,  # cluster-a (hole at ranks 3, 4)
+            self.nodes[3]: 7,  # cluster-b
+            self.nodes[4]: 8,  # cluster-b
+            self.nodes[5]: 9,  # default
+            self.nodes[6]: 10,  # cluster-c
+        }
+
+        result = _DistributedRendezvousOpExecutor._assign_group_ranks(
+            participants, prev_participants
+        )
+
+        # Verify previous assignments are preserved
+        for node, prev_rank in prev_participants.items():
+            self.assertEqual(result[node], prev_rank)
+
+        # Verify all ranks are assigned
+        self.assertEqual(len(result), len(self.nodes))
+        self.assertEqual(set(result.values()), set(range(len(self.nodes))))
