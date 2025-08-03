@@ -294,11 +294,17 @@ class CallWrapper:
             base_store = wrapper.store_factory(**store_kwargs)
             log.debug(f'{base_store=} {store_kwargs=}')
 
+            # Use original barrier with indefinite timeout for restarted ranks
+            # This ensures restarted ranks wait indefinitely until all ranks restart
             base_store.initial_barrier(
                 ranks=[state.rank],
                 rendezvous_count=state.world_size,
-                timeout=wrapper.barrier_timeout,
+                timeout=timedelta.max,  # Indefinite timeout
             )
+
+            # Only Rank 0 should reset the barrier after it completes
+            if state.rank == 0:
+                base_store.reset_barrier(base_store.INITIAL_BARRIER)
             base_store.set_initial_rank(state.rank, state.initial_rank)
             self.monitor_process.can_create_store()
 

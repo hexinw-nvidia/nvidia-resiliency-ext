@@ -303,6 +303,35 @@ class StoreMixin:
 
         log.debug(f'{ranks=} exits {group_name=} {cn} {rendezvous_count=}')
 
+    def reset_barrier(self, group_name: str):
+        """
+        Reset the barrier state for a clean start in the next iteration.
+
+        This clears the counter, arrived ranks list, and completion flag
+        so the barrier can be used again in the next iteration.
+
+        Args:
+            group_name: The barrier group name to reset
+        """
+        cn = inspect.currentframe().f_code.co_name
+        store_key = f'{self.BARRIER_PREFIX}:{cn}:{group_name}'
+        last_worker_arrived_key = f'{store_key}:last_worker_arrived'
+        arrived_key = f'{store_key}:arrived'
+
+        # Clear the barrier state
+        try:
+            self.deleteKey(store_key)
+        except KeyError:
+            pass
+        try:
+            self.deleteKey(arrived_key)
+        except KeyError:
+            pass
+        try:
+            self.deleteKey(last_worker_arrived_key)
+        except KeyError:
+            pass
+
     initial_barrier = functools.partialmethod(
         barrier,
         group_name=INITIAL_BARRIER,
@@ -333,6 +362,7 @@ class TCPStore(torch.distributed.TCPStore, StoreMixin):
         wait_for_workers: bool = True,
         multi_tenant: bool = False,
         use_libuv: bool = True,
+        tcp_store_host_rank: Optional[int] = None,
     ):
         log = logging.getLogger(__name__)
 
@@ -345,6 +375,9 @@ class TCPStore(torch.distributed.TCPStore, StoreMixin):
 
         rank = int(os.environ['RANK'])
 
+        # Save the host rank for later use
+        self.tcp_store_host_rank = tcp_store_host_rank or self.TCP_STORE_HOST_RANK
+
         kwargs = {
             'host_name': host_name,
             'port': port,
@@ -355,7 +388,7 @@ class TCPStore(torch.distributed.TCPStore, StoreMixin):
             'use_libuv': use_libuv,
         }
 
-        if rank == self.TCP_STORE_HOST_RANK:
+        if rank == self.tcp_store_host_rank:
             try:
                 super().__init__(is_master=True, **kwargs)
                 log.debug(f'{rank=} hosting {type(self).__name__}({kwargs})')
@@ -367,7 +400,11 @@ class TCPStore(torch.distributed.TCPStore, StoreMixin):
 
     @property
     def critical_ranks(self):
-        return (self.TCP_STORE_HOST_RANK,)
+        # If TCP_STORE_HOST_RANK is -1, there are no critical ranks
+        # (all ranks are clients to external service)
+        if self.tcp_store_host_rank == -1:
+            return ()
+        return (self.tcp_store_host_rank,)
 
 
 class PrefixStore(torch.distributed.PrefixStore, StoreMixin):
