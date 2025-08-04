@@ -11,9 +11,9 @@ import argparse
 import logging
 import os
 import signal
+import socket
 import sys
 import time
-from typing import Optional
 
 import torch.distributed as dist
 
@@ -115,7 +115,7 @@ class TCPStoreService:
                     # Note: TCPStore doesn't have a clean shutdown method
                     # The service will be cleaned up when the process exits
                     del self.store
-                except:
+                except Exception:
                     pass
                 self.store = None
 
@@ -141,8 +141,8 @@ def main():
     parser.add_argument(
         '--port',
         type=int,
-        default=29500,
-        help='Port to bind the TCPStore server to (default: 29500)',
+        default=None,  # Will be set to MASTER_PORT + 2 if not specified
+        help='Port to bind the TCPStore server to (default: MASTER_PORT + 2)',
     )
     parser.add_argument(
         '--world-size',
@@ -171,21 +171,82 @@ def main():
 
     args = parser.parse_args()
 
-    # Create and start the service
-    service = TCPStoreService(
-        host=args.host,
-        port=args.port,
-        world_size=args.world_size,
-        timeout=args.timeout,
-        use_libuv=args.use_libuv,
-        log_level=args.log_level,
+    # Setup logging first
+    logging.basicConfig(
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        level=getattr(logging, args.log_level.upper()),
     )
+    logger = logging.getLogger(__name__)
 
-    try:
-        service.start()
-    except Exception as e:
-        logging.error(f"Service failed: {e}")
+    # Get rank from environment (default to 0 if not set)
+    rank = int(os.environ.get('RANK', '0'))
+
+    # Get environment variables for debugging
+    hostname = socket.gethostname()
+    master_addr = os.environ.get('MASTER_ADDR')
+    master_port = os.environ.get('MASTER_PORT')
+
+    # Require MASTER_ADDR and MASTER_PORT to be set
+    if master_addr is None:
+        logger.error("MASTER_ADDR environment variable is not set")
         sys.exit(1)
+
+    if master_port is None:
+        logger.error("MASTER_PORT environment variable is not set")
+        sys.exit(1)
+
+    # Set default port to MASTER_PORT + 2 if not specified
+    if args.port is None:
+        args.port = int(master_port) + 2
+
+    # Print debugging information only on Rank 0
+    if rank == 0:
+        logger.info("=== TCPStore Service Debug Information ===")
+        logger.info(f"Hostname: {hostname}")
+        logger.info(f"MASTER_ADDR: {master_addr}")
+        logger.info(f"MASTER_PORT: {master_port}")
+        logger.info(f"RANK: {rank}")
+        logger.info(f"Service Host: {args.host}")
+        logger.info(f"Service Port: {args.port}")
+        logger.info(f"World Size: {args.world_size}")
+        logger.info("==========================================")
+
+    logger.info(f"TCPStore service process started on rank {rank}")
+    logger.info(f"Host: {args.host}, Port: {args.port}, World Size: {args.world_size}")
+
+    # Only Rank 0 creates the actual TCPStore server
+    if rank == 0:
+        logger.info("Rank 0: Creating TCPStore server")
+
+        # Create and start the service
+        service = TCPStoreService(
+            host=args.host,
+            port=args.port,
+            world_size=args.world_size,
+            timeout=args.timeout,
+            use_libuv=args.use_libuv,
+            log_level=args.log_level,
+        )
+
+        try:
+            service.start()
+        except Exception as e:
+            logger.error(f"Service failed: {e}")
+            sys.exit(1)
+    else:
+        logger.info(f"Rank {rank}: Waiting for TCPStore server to be ready")
+
+        # Non-Rank 0 processes just wait and monitor
+        # This ensures all nodes have a process running
+        try:
+            while True:
+                time.sleep(1)
+                # Optional: Add health check or monitoring logic here
+        except KeyboardInterrupt:
+            logger.info(f"Rank {rank}: Received keyboard interrupt, shutting down")
+        except Exception as e:
+            logger.error(f"Rank {rank}: Process failed: {e}")
+            sys.exit(1)
 
 
 if __name__ == '__main__':
