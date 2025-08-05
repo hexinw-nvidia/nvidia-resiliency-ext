@@ -32,6 +32,10 @@ def torch_older_than(version):
 
 
 def format_exc(exc: BaseException):
+    import traceback
+
+    return traceback.format_exc()
+
     excs = [repr(exc)]
     while (exc := exc.__cause__) is not None:
         excs.append(repr(exc))

@@ -156,6 +156,7 @@ class Wrapper:
         enabled: bool = True,
         completion: Optional[Completion] = None,
         terminate: Optional[Terminate] = None,
+        use_global_iteration: bool = False,
     ):
         enforce_subclass('store_factory', StoreMixin)
         enforce_type('store_kwargs', (dict, type(None)))
@@ -180,6 +181,7 @@ class Wrapper:
         enforce_type('enabled', bool)
         enforce_type('completion', (Completion, type(None)))
         enforce_type('terminate', (Terminate, type(None)))
+        enforce_type('use_global_iteration', bool)
 
         enforce_value(soft_timeout < hard_timeout < barrier_timeout)
         enforce_value(monitor_process_interval < barrier_timeout)
@@ -230,6 +232,7 @@ class Wrapper:
         self.enabled = enabled
         self.completion = completion
         self.terminate = terminate
+        self.use_global_iteration = use_global_iteration
 
     def __call__(self, fn):
         if not self.enabled:
@@ -302,9 +305,80 @@ class CallWrapper:
                 timeout=timedelta.max,  # Indefinite timeout
             )
 
-            # Only Rank 0 should reset the barrier after it completes
+            # Phase 2: All ranks increment acknowledgment counter
+            # This ensures no rank resets until all ranks have seen the completion
+            barrier_key = f'{base_store.BARRIER_PREFIX}:barrier:{base_store.INITIAL_BARRIER}'
+            completion_ack_key = f'{barrier_key}:completion_ack'
+            ack_count = base_store.add(completion_ack_key, 1)
+            sys.stderr.write(
+                f'Rank {state.rank}: Incremented completion ack counter: {ack_count}\n'
+            )
+
+            # Only Rank 0 waits for all ranks to acknowledge completion
             if state.rank == 0:
-                base_store.reset_barrier(base_store.INITIAL_BARRIER)
+                # Wait for all ranks to acknowledge completion
+                sys.stderr.write(
+                    f'Rank {state.rank}: Waiting for all ranks to acknowledge completion\n'
+                )
+                while True:
+                    try:
+                        current_ack_count = int(base_store.get(completion_ack_key))
+                        if current_ack_count >= state.world_size:
+                            break
+                        time.sleep(0.001)  # Small delay to avoid busy waiting
+                    except Exception as e:
+                        sys.stderr.write(f'Rank {state.rank}: Error checking ack count: {e}\n')
+                        time.sleep(0.001)
+                sys.stderr.write(f'Rank {state.rank}: All ranks acknowledged completion\n')
+
+            # Only Rank 0 should reset the barrier after all ranks have completed
+            if state.rank == 0:
+                # Dump the initial_barrier key before reset_barrier
+                barrier_key = f'{base_store.BARRIER_PREFIX}:barrier:{base_store.INITIAL_BARRIER}'
+                sys.stderr.write(
+                    f'Rank {state.rank}: Before reset_barrier, TCPStore key: {barrier_key}\n'
+                )
+
+                # Print the value of the TCPStore key before reset_barrier
+                try:
+                    # Wait for the key to exist with a short timeout
+                    base_store.wait([barrier_key], datetime.timedelta(seconds=1))
+                    barrier_value = base_store.get(barrier_key)
+                    sys.stderr.write(
+                        f'Rank {state.rank}: Before reset_barrier, TCPStore value: {barrier_value}\n'
+                    )
+                except Exception as e:
+                    sys.stderr.write(
+                        f'Rank {state.rank}: Before reset_barrier, TCPStore value error: {e}\n'
+                    )
+
+                # Now that all ranks have completed the barrier, it's safe to reset
+                sys.stderr.write(
+                    f'Rank {state.rank}: All ranks completed barrier, proceeding with reset\n'
+                )
+
+                # Use the new reset_initial_barrier method that properly deletes all keys
+                base_store.reset_initial_barrier()
+                sys.stderr.write(f'Rank {state.rank}: Successfully reset initial barrier\n')
+
+                # Dump the initial_barrier key after reset_barrier
+                sys.stderr.write(
+                    f'Rank {state.rank}: After reset_barrier, TCPStore key: {barrier_key}\n'
+                )
+
+                # Print the value of the TCPStore key after reset_barrier
+                try:
+                    # Wait for the key to exist with a short timeout
+                    base_store.wait([barrier_key], datetime.timedelta(seconds=1))
+                    barrier_value = base_store.get(barrier_key)
+                    sys.stderr.write(
+                        f'Rank {state.rank}: After reset_barrier, TCPStore value: {barrier_value}\n'
+                    )
+                except Exception as e:
+                    sys.stderr.write(
+                        f'Rank {state.rank}: After reset_barrier, TCPStore value error: {e}\n'
+                    )
+
             base_store.set_initial_rank(state.rank, state.initial_rank)
             self.monitor_process.can_create_store()
 
@@ -413,6 +487,14 @@ class CallWrapper:
 
         if wrapper.rank_filter is not None:
             state = wrapper.rank_filter(state)
+
+        # Configure state to use global iteration if enabled
+        state.use_global_iteration = wrapper.use_global_iteration
+
+        # If using global iteration, sync with the global counter
+        if wrapper.use_global_iteration:
+            state.sync_with_global_iteration(base_store, wrapper.barrier_timeout)
+
         state.set_distributed_vars()
 
         monitor_process.start()
@@ -556,7 +638,19 @@ class CallWrapper:
                 else:
                     break
 
-                state.advance()
+                # Configure state to use global iteration if enabled
+                state.use_global_iteration = wrapper.use_global_iteration
+
+                # Advance iteration (local or global based on configuration)
+                if wrapper.use_global_iteration:
+                    # Use decentralized consensus - no coordinator needed
+                    state.advance(
+                        store=base_store,
+                        world_size=state.world_size,
+                        timeout=wrapper.barrier_timeout,
+                    )
+                else:
+                    state.advance()
 
                 while gc.collect():
                     pass

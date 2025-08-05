@@ -14,6 +14,7 @@ import signal
 import socket
 import sys
 import time
+from datetime import timedelta
 
 import torch.distributed as dist
 
@@ -141,8 +142,14 @@ def main():
     parser.add_argument(
         '--port',
         type=int,
-        default=None,  # Will be set to MASTER_PORT + 2 if not specified
-        help='Port to bind the TCPStore server to (default: MASTER_PORT + 2)',
+        default=None,  # Will be set to MASTER_PORT + port_offset if not specified
+        help='Port to bind the TCPStore server to (default: MASTER_PORT + port_offset)',
+    )
+    parser.add_argument(
+        '--port-offset',
+        type=int,
+        default=2,
+        help='Port offset from MASTER_PORT (default: 2)',
     )
     parser.add_argument(
         '--world-size',
@@ -180,6 +187,10 @@ def main():
 
     # Get rank from environment (default to 0 if not set)
     rank = int(os.environ.get('RANK', '0'))
+    if rank != 0:
+        sys.exit(0)
+
+    # Only Rank 0 creates the actual TCPStore server
 
     # Get environment variables for debugging
     hostname = socket.gethostname()
@@ -195,58 +206,35 @@ def main():
         logger.error("MASTER_PORT environment variable is not set")
         sys.exit(1)
 
-    # Set default port to MASTER_PORT + 2 if not specified
+    # Set default port to MASTER_PORT + port_offset if not specified
     if args.port is None:
-        args.port = int(master_port) + 2
+        args.port = int(master_port) + args.port_offset
 
-    # Print debugging information only on Rank 0
-    if rank == 0:
-        logger.info("=== TCPStore Service Debug Information ===")
-        logger.info(f"Hostname: {hostname}")
-        logger.info(f"MASTER_ADDR: {master_addr}")
-        logger.info(f"MASTER_PORT: {master_port}")
-        logger.info(f"RANK: {rank}")
-        logger.info(f"Service Host: {args.host}")
-        logger.info(f"Service Port: {args.port}")
-        logger.info(f"World Size: {args.world_size}")
-        logger.info("==========================================")
+    logger.info("==== Rank 0: Creating TCPStore server ====")
+    logger.info(f"Hostname: {hostname}")
+    logger.info(f"MASTER_ADDR: {master_addr}")
+    logger.info(f"MASTER_PORT: {master_port}")
+    logger.info(f"Port Offset: {args.port_offset}")
+    logger.info(f"RANK: {rank}")
+    logger.info(f"Service Host: {args.host}")
+    logger.info(f"Service Port: {args.port}")
+    logger.info(f"World Size: {args.world_size}")
 
-    logger.info(f"TCPStore service process started on rank {rank}")
-    logger.info(f"Host: {args.host}, Port: {args.port}, World Size: {args.world_size}")
+    # Create and start the service
+    service = TCPStoreService(
+        host=args.host,
+        port=args.port,
+        world_size=args.world_size,
+        timeout=args.timeout,
+        use_libuv=args.use_libuv,
+        log_level=args.log_level,
+    )
 
-    # Only Rank 0 creates the actual TCPStore server
-    if rank == 0:
-        logger.info("Rank 0: Creating TCPStore server")
-
-        # Create and start the service
-        service = TCPStoreService(
-            host=args.host,
-            port=args.port,
-            world_size=args.world_size,
-            timeout=args.timeout,
-            use_libuv=args.use_libuv,
-            log_level=args.log_level,
-        )
-
-        try:
-            service.start()
-        except Exception as e:
-            logger.error(f"Service failed: {e}")
-            sys.exit(1)
-    else:
-        logger.info(f"Rank {rank}: Waiting for TCPStore server to be ready")
-
-        # Non-Rank 0 processes just wait and monitor
-        # This ensures all nodes have a process running
-        try:
-            while True:
-                time.sleep(1)
-                # Optional: Add health check or monitoring logic here
-        except KeyboardInterrupt:
-            logger.info(f"Rank {rank}: Received keyboard interrupt, shutting down")
-        except Exception as e:
-            logger.error(f"Rank {rank}: Process failed: {e}")
-            sys.exit(1)
+    try:
+        service.start()
+    except Exception as e:
+        logger.error(f"Service failed: {e}")
+        sys.exit(1)
 
 
 if __name__ == '__main__':
