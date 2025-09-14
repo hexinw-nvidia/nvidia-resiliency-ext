@@ -69,6 +69,7 @@ class FaultToleranceConfig:
     enable_nic_monitor: bool = True
     pci_topo_file: Optional[str] = None
     link_down_path_template: Optional[str] = None
+    disable_worker_states: bool = True
 
     @staticmethod
     def from_kwargs(ignore_not_recognized: bool = True, **kwargs) -> 'FaultToleranceConfig':

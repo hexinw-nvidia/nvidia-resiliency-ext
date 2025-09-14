@@ -232,6 +232,9 @@ class RendezvousSettings:
             If set to True (default), nodes from the redundancy list and new arrivals are migrated
             to the wait list. If set to False, new arrivals will be moved to the redundancy list
             and will wait there until the next rendezvous round.
+        disable_worker_states:
+            Whether to disable worker state tracking in the rendezvous.
+            If set to True, worker state operations are skipped.
     """
 
     run_id: str
@@ -241,6 +244,7 @@ class RendezvousSettings:
     keep_alive_interval: timedelta
     keep_alive_max_attempt: int
     upscaling_enabled: bool = True
+    disable_worker_states: bool = True
 
 
 @dataclass(eq=True, order=True, frozen=True)
@@ -546,7 +550,7 @@ class _BackendRendezvousStateHolder(_RendezvousStateHolder):
             except KeyError:
                 pass
 
-            if dead_node in state.worker_states:
+            if not self._settings.disable_worker_states and dead_node in state.worker_states:
                 if not _is_final_workers_state(state.worker_states[dead_node]):
                     state.worker_states[dead_node] = WorkerState.UNKNOWN
 
@@ -922,7 +926,9 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
         state.participants = self._assign_ranks(state.participants, self._prev_participants)
 
         # Set initial worker states, assume all workers are healthy at the beginning
-        state.worker_states = {n: WorkerState.HEALTHY for n in state.participants}
+        # Only initialize worker_states if not disabled
+        if not self._settings.disable_worker_states:
+            state.worker_states = {n: WorkerState.HEALTHY for n in state.participants}
 
     def _mark_rendezvous_closed(self) -> None:
         msg = (
@@ -952,6 +958,10 @@ class _SetWorkersStateOp:
         self.curr_state = None
 
     def __call__(self, ctx: _RendezvousContext, deadline: float) -> _Action:
+        # Skip worker state operations if disabled
+        if ctx.settings.disable_worker_states:
+            return _Action.FINISH
+
         # try to set the target state for a worker group.
         # if it reached another final state do not modify it.
         self.curr_state = ctx.state.worker_states[ctx.node]
@@ -971,12 +981,14 @@ class _RendezvousExitOp:
         self._remove_from_all = remove_from_all
 
     def __call__(self, ctx: _RendezvousContext, deadline: float) -> _Action:
-        # If workers of the node being removed did not reach a final state mark it as UNKNOWN
-        # useful e.g. when leaving an agent due to a signal, and its workers are still HEALTHY.
-        curr_state = ctx.state.worker_states.get(ctx.node, None)
-        if curr_state is not None and not _is_final_workers_state(curr_state):
-            ctx.state.worker_states[ctx.node] = WorkerState.UNKNOWN
-            return _Action.KEEP_ALIVE  # keep alive to force the rdzv state sync
+        # Skip worker state operations if disabled
+        if not ctx.settings.disable_worker_states:
+            # If workers of the node being removed did not reach a final state mark it as UNKNOWN
+            # useful e.g. when leaving an agent due to a signal, and its workers are still HEALTHY.
+            curr_state = ctx.state.worker_states.get(ctx.node, None)
+            if curr_state is not None and not _is_final_workers_state(curr_state):
+                ctx.state.worker_states[ctx.node] = WorkerState.UNKNOWN
+                return _Action.KEEP_ALIVE  # keep alive to force the rdzv state sync
         if ctx.node in ctx.state.participants:
             # always remove from participants
             return self._action_or_timeout(_Action.REMOVE_FROM_PARTICIPANTS, deadline)
@@ -1155,6 +1167,7 @@ class FtRendezvousHandler(RendezvousHandler):
         local_addr: Optional[str] = None,
         timeout: Optional[RendezvousTimeout] = None,
         upscaling_enabled: bool = True,
+        disable_worker_states: bool = True,
     ):
         """Create a new :py:class:`FtRendezvousHandler`.
 
@@ -1175,6 +1188,8 @@ class FtRendezvousHandler(RendezvousHandler):
                 The timeout configuration of the rendezvous.
             upscaling_enabled:
                 Whether to enable upscaling of a completed rendezvous with redundant or new nodes.
+            disable_worker_states:
+                Whether to disable worker state tracking in the rendezvous.
         """
         # We associate each handler instance with a unique node descriptor.
         node = cls._node_desc_generator.generate(local_addr)
@@ -1187,6 +1202,7 @@ class FtRendezvousHandler(RendezvousHandler):
             keep_alive_interval=timedelta(seconds=5),
             keep_alive_max_attempt=3,
             upscaling_enabled=upscaling_enabled,
+            disable_worker_states=disable_worker_states,
         )
 
         state_holder = _BackendRendezvousStateHolder(backend, settings)
@@ -1454,6 +1470,9 @@ class FtRendezvousHandler(RendezvousHandler):
         try:
             with self._heartbeat_lock:
                 self._state_holder.sync()
+                # Return empty dict if worker states are disabled
+                if self._settings.disable_worker_states:
+                    return {}
                 return self._state_holder.state.worker_states.copy()
         except Exception as e:
             self._record(
@@ -1655,6 +1674,9 @@ def create_handler(
         # torchrun default behaviour if not specified otherwise
         upscale_completed = params.config.get('upscaling_enabled', True)
 
+        # Get disable_worker_states from params.config, fallback to function parameter
+        disable_worker_states_from_config = params.config.get('disable_worker_states', True)
+
         return FtRendezvousHandler.from_backend(
             params.run_id,
             store,
@@ -1664,6 +1686,7 @@ def create_handler(
             params.local_addr,
             timeout,
             upscaling_enabled=upscale_completed,
+            disable_worker_states=disable_worker_states_from_config,
         )
     except Exception as e:
         construct_and_record_rdzv_event(

@@ -138,7 +138,7 @@ class LocalElasticAgent(SimpleElasticAgent):
     python multiprocessing compatible. To pass multiprocessing data structures
     to the workers you may create the data structure in the same multiprocessing
     context as the specified ``start_method`` and pass it as a function argument.
-    
+
     Note: If your training script uses the nvrx logger, make sure to call
     ``setup_logger()`` at the beginning of your training function to ensure
     the logger is properly set up in each subprocess.
@@ -179,12 +179,12 @@ class LocalElasticAgent(SimpleElasticAgent):
             # Ensure nvrx logger is set up in this subprocess
             from nvidia_resiliency_ext.shared_utils.log_manager import setup_logger
             setup_logger()
-            
+
             # Use the nvrx logger
             import logging
             logger = logging.getLogger(LogConfig.name)
             logger.info("Training started")
-            
+
             return "do train"
 
         def main():
@@ -961,6 +961,9 @@ def launch_agent(
     # with min-healthy restarting policy, if the rendezvous is completed (workers are running),
     # we dont want to replace missing/dead nodes with spares nor to upscale the rendezvous with new arrivals
     config.rdzv_configs['upscaling_enabled'] = config.restart_policy != "min-healthy"
+
+    # Pass disable_worker_states from fault tolerance config to rendezvous config
+    config.rdzv_configs['disable_worker_states'] = config.fault_tol_cfg.disable_worker_states
 
     logger.info(
         "Starting elastic_operator with launch configs:\n"
@@ -1806,7 +1809,8 @@ def get_args_parser() -> ArgumentParser:
         dest="ft_restart_policy",
         help="Worker groups restarting policy. Options: "
         "'any-failed' restart if any worker group fails (torchrun's default); "
-        "'min-healthy' restart if number of healthy worker groups falls below <minimum_nodes>",
+        "'min-healthy' restart if number of healthy worker groups falls below <minimum_nodes>. "
+        "Note: 'min-healthy' requires worker states tracking (disable_worker_states=False).",
     )
 
     parser.add_argument(
@@ -1841,6 +1845,16 @@ def get_args_parser() -> ArgumentParser:
         action='store_true',
         dest="ft_ignore_missing_cfg",
         help="Do not raise an error if there is no Fault Tolerance pkg config provided, just use default settings.",
+    )
+
+    parser.add_argument(
+        "--ft-disable-worker-states",
+        "--ft-disable_worker_states",
+        type=lambda x: str(x).lower() in ["true", "1", "yes"],
+        default=True,
+        dest="ft_disable_worker_states",
+        help="Disable worker states tracking in fault tolerance module. "
+        "Note: This disables min-healthy restart policy functionality.",
     )
 
     #
@@ -1999,6 +2013,16 @@ def config_from_args(args) -> Tuple[LaunchConfig, Union[Callable, str], List[str
 
 
     fault_tol_cfg = FaultToleranceConfig.from_args(args)
+
+    # Validate configuration consistency
+    if fault_tol_cfg.disable_worker_states and args.ft_restart_policy == 'min-healthy':
+        raise ValueError(
+            "Invalid configuration: disable_worker_states=True is incompatible with "
+            "restart_policy='min-healthy'. The min-healthy policy requires worker state "
+            "tracking to determine the number of healthy worker groups. Please either:\n"
+            "1. Set disable_worker_states=False, or\n"
+            "2. Use restart_policy='any-failed' instead of 'min-healthy'"
+        )
 
     ranks: Optional[Set[int]] = None
     if args.local_ranks_filter:
