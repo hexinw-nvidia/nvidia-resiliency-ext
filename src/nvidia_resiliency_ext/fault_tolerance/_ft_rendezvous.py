@@ -24,8 +24,10 @@ import os
 # More Info: https://bandit.readthedocs.io/en/1.7.9/blacklists/blacklist_imports.html#b403-import-pickle
 import pickle  # nosec
 import socket
+import sys
 import threading
 import time
+import traceback
 import weakref
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -457,14 +459,26 @@ class _BackendRendezvousStateHolder(_RendezvousStateHolder):
 
         has_set: Optional[bool]
 
+        # Get current thread once and pre-compute thread IDs for performance
+        current_thread = threading.current_thread()
+        thread_ident = current_thread.ident
+        set_thread_id = f"{self._settings.run_id}_sync_set_{thread_ident}"
+        get_thread_id = f"{self._settings.run_id}_sync_get_{thread_ident}"
+
         if self._dirty:
             has_set = False
 
             state_bits = pickle.dumps(self._state)
 
-            set_response = self._backend.set_state(state_bits, self._token)
-            if set_response is not None:
-                state_bits, token, has_set = set_response
+            # Add watchdog monitoring for set_state operation
+            _rendezvous_watchdog.start_monitoring(set_thread_id, "sync_set_state", current_thread)
+
+            try:
+                set_response = self._backend.set_state(state_bits, self._token)
+                if set_response is not None:
+                    state_bits, token, has_set = set_response
+            finally:
+                _rendezvous_watchdog.stop_monitoring(set_thread_id)
         else:
             has_set = None
 
@@ -474,9 +488,15 @@ class _BackendRendezvousStateHolder(_RendezvousStateHolder):
                 if self._last_sync_time >= max(time.monotonic() - self._cache_duration, 0):
                     return None
 
-            get_response = self._backend.get_state()
-            if get_response is not None:
-                state_bits, token = get_response
+            # Add watchdog monitoring for get_state operation
+            _rendezvous_watchdog.start_monitoring(get_thread_id, "sync_get_state", current_thread)
+
+            try:
+                get_response = self._backend.get_state()
+                if get_response is not None:
+                    state_bits, token = get_response
+            finally:
+                _rendezvous_watchdog.stop_monitoring(get_thread_id)
 
         if state_bits is not None:
             try:
@@ -692,6 +712,34 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
         update_deadline: Optional[Callable[[timedelta], float]] = None,
     ) -> None:
         """See base class."""
+        # Generate unique thread ID for this operation
+        current_thread = threading.current_thread()
+        operation_name = (
+            state_handler.__class__.__name__
+            if hasattr(state_handler, '__class__')
+            else str(state_handler)
+        )
+        thread_id = f"{self._node}_{operation_name}_{current_thread.ident}"
+
+        # Start watchdog monitoring if operation wants it
+        should_monitor = hasattr(state_handler, 'enable_watchdog') and state_handler.enable_watchdog
+        if should_monitor:
+            _rendezvous_watchdog.start_monitoring(thread_id, operation_name, current_thread)
+
+        try:
+            self._run_operation(state_handler, deadline, update_deadline)
+        finally:
+            # Stop watchdog monitoring if enabled
+            if should_monitor:
+                _rendezvous_watchdog.stop_monitoring(thread_id)
+
+    def _run_operation(
+        self,
+        state_handler: Callable[[_RendezvousContext, float], _Action],
+        deadline: float,
+        update_deadline: Optional[Callable[[timedelta], float]] = None,
+    ) -> None:
+        """Execute the core rendezvous operation logic."""
         action = None
         while action != _Action.FINISH:
             # Reads or writes the latest rendezvous state shared by all nodes in
@@ -957,6 +1005,11 @@ class _SetWorkersStateOp:
         self.target_state = target_state
         self.curr_state = None
 
+    @property
+    def enable_watchdog(self) -> bool:
+        """Disable watchdog monitoring for worker state operations as they should be fast."""
+        return False
+
     def __call__(self, ctx: _RendezvousContext, deadline: float) -> _Action:
         # Skip worker state operations if disabled
         if ctx.settings.disable_worker_states:
@@ -979,6 +1032,11 @@ class _RendezvousExitOp:
 
     def __init__(self, remove_from_all=False):
         self._remove_from_all = remove_from_all
+
+    @property
+    def enable_watchdog(self) -> bool:
+        """Enable watchdog monitoring for this operation."""
+        return False
 
     def __call__(self, ctx: _RendezvousContext, deadline: float) -> _Action:
         # Skip worker state operations if disabled
@@ -1006,8 +1064,119 @@ class _RendezvousExitOp:
         return action
 
 
+class RendezvousOperationTimeoutError(RendezvousError):
+    """Raised when a rendezvous operation times out."""
+
+    pass
+
+
+class _RendezvousWatchdog:
+    """Watchdog thread to monitor rendezvous operations and detect hangs."""
+
+    def __init__(self, timeout_seconds: float = 5.0):
+        self.timeout_seconds = timeout_seconds
+        self._monitored_threads = {}
+        self._lock = threading.Lock()
+        self._watchdog_thread = None
+        self._shutdown = False
+
+    def start_monitoring(
+        self, thread_id: str, operation_name: str, target_thread: threading.Thread
+    ) -> None:
+        """Start monitoring a specific thread for a rendezvous operation."""
+        with self._lock:
+            self._monitored_threads[thread_id] = {
+                'operation_name': operation_name,
+                'target_thread': target_thread,
+                'start_time': time.monotonic(),
+                'stack_trace': None,
+            }
+
+            if self._watchdog_thread is None or not self._watchdog_thread.is_alive():
+                self._watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True)
+                self._watchdog_thread.start()
+
+    def stop_monitoring(self, thread_id: str) -> None:
+        """Stop monitoring a specific thread."""
+        with self._lock:
+            self._monitored_threads.pop(thread_id, None)
+
+    def _watchdog_loop(self) -> None:
+        """Main watchdog loop that checks for hung operations."""
+        while not self._shutdown:
+            time.sleep(0.5)  # Check every 500ms
+
+            current_time = time.monotonic()
+            hung_operations = []
+
+            with self._lock:
+                for thread_id, info in list(self._monitored_threads.items()):
+                    elapsed = current_time - info['start_time']
+                    if elapsed > self.timeout_seconds:
+                        # Capture stack trace
+                        target_thread = info['target_thread']
+                        if target_thread.is_alive():
+                            # Get the stack trace of the target thread
+                            stack_trace = self._get_thread_stack_trace(target_thread)
+                            info['stack_trace'] = stack_trace
+                            hung_operations.append((thread_id, info))
+
+            # Handle hung operations outside the lock
+            for thread_id, info in hung_operations:
+                self._handle_hung_operation(thread_id, info)
+
+    def _get_thread_stack_trace(self, target_thread: threading.Thread) -> str:
+        """Get the stack trace of a specific thread."""
+        try:
+            # Get the frame of the target thread
+            frame = sys._current_frames().get(target_thread.ident)
+            if frame:
+                return ''.join(traceback.format_stack(frame))
+            else:
+                return "Could not retrieve stack trace - thread may have finished"
+        except Exception as e:
+            return f"Error retrieving stack trace: {e}"
+
+    def _handle_hung_operation(self, thread_id: str, info: dict) -> None:
+        """Handle a hung operation by logging and raising an exception."""
+        operation_name = info['operation_name']
+        elapsed_time = time.monotonic() - info['start_time']
+        stack_trace = info['stack_trace']
+
+        # Log the hung operation with stack trace
+        log.error(
+            f"Rendezvous operation '{operation_name}' (thread_id={thread_id}) has been running for {elapsed_time:.2f} seconds"
+        )
+        log.error(f"Stack trace of hung operation:\n{stack_trace}")
+
+        # Remove from monitoring
+        with self._lock:
+            self._monitored_threads.pop(thread_id, None)
+
+        # Raise exception to terminate the operation
+        raise RendezvousOperationTimeoutError(
+            f"Rendezvous operation '{operation_name}' timed out after {elapsed_time:.2f} seconds. "
+            f"Operation appears to be stuck. See logs for stack trace."
+        )
+
+    def shutdown(self) -> None:
+        """Shutdown the watchdog."""
+        self._shutdown = True
+        if self._watchdog_thread and self._watchdog_thread.is_alive():
+            self._watchdog_thread.join(timeout=1.0)
+
+
+# Global watchdog instance
+_rendezvous_watchdog = _RendezvousWatchdog(timeout_seconds=5.0)
+
+
 class _RendezvousJoinOp:
     """Represent a rendezvous join operation."""
+
+    @property
+    def enable_watchdog(self) -> bool:
+        """Disable watchdog monitoring for join operations as they may take longer."""
+        return False
 
     def __call__(self, ctx: _RendezvousContext, deadline: float) -> _Action:
         state = ctx.state
@@ -1122,6 +1291,11 @@ class _RendezvousJoinOp:
 class _RendezvousCloseOp:
     """Represent a rendezvous close operation."""
 
+    @property
+    def enable_watchdog(self) -> bool:
+        """Enable watchdog monitoring for close operations."""
+        return False
+
     def __call__(self, ctx: _RendezvousContext, deadline: float) -> _Action:
         if ctx.state.closed:
             return _Action.FINISH
@@ -1132,6 +1306,11 @@ class _RendezvousCloseOp:
 
 class _RendezvousKeepAliveOp:
     """Represent a rendezvous keep-alive update operation."""
+
+    @property
+    def enable_watchdog(self) -> bool:
+        """Disable watchdog monitoring for keep-alive operations as they should be fast."""
+        return False
 
     def __call__(self, ctx: _RendezvousContext, deadline: float) -> _Action:
         if _should_keep_alive(ctx):
