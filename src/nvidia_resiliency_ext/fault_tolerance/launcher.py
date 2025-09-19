@@ -15,7 +15,6 @@
 import asyncio
 
 # fmt: off
-import collections
 import contextlib
 import importlib.metadata as metadata
 import json
