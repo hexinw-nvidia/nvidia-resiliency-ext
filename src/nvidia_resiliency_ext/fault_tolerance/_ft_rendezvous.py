@@ -34,7 +34,6 @@ from enum import Enum
 from typing import Any, Callable, Optional, Union
 
 from torch.distributed import PrefixStore, Store
-from torch.distributed.elastic.agent.server.api import WorkerState
 from torch.distributed.elastic.events import NodeState, construct_and_record_rdzv_event
 from torch.distributed.elastic.rendezvous.api import (
     RendezvousClosedError,

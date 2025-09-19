@@ -20,9 +20,7 @@ Use one of the following approaches instead:
 
 1. **FT launcher only**: Use the FT launcher's fault tolerance without inprocess recovery.
 
-2. **Inprocess only**: Use inprocess recovery without the FT launcher by setting ``--max-restarts=0`` to disable FT launcher restarts.
-
-3. **Separate systems**: Use FT launcher and inprocess recovery in separate training runs, not combined.
+2. **Inprocess only**: Use inprocess recovery without the FT launcher.
 
 .. note::
 

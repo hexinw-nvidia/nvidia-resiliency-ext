@@ -643,7 +643,6 @@ class LocalElasticAgent(SimpleElasticAgent):
         try:
             rdzv_handler = self._rdzv_handler
             rdzv_handler._stop_heartbeats()  # stops rdzv backround thread
-            rdzv_handler.remove_this_node()
             if close:
                 rdzv_handler.set_closed()
             if self._is_store_host:
