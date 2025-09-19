@@ -315,16 +315,6 @@ class _RendezvousState:
             the next rendezvous without triggering re-rendezvous.
         last_heartbeats:
             A dictionary containing each node's last heartbeat time.
-        worker_states:
-            A dictionary containing each node's worker group state.
-            Possible group states are:
-            - WorkerState.HEALTHY: all workers are running normally.
-            - WorkerState.UNHEALTHY: at least one worker failed, but some workers are still running
-            - WorkerState.SUCCEEDED: all workers succeeded
-            - WorkerState.FAILED: at least one worker failed, all workers completed
-            - WorkerState.UNKNOWN: node did not send heartbeats
-            WorkerState.SUCCEEDED, WorkerState.FAILED, WorkerState.UNKNOWN are final states:
-            once set, they can't be changed.
     """
 
     round: int
@@ -335,7 +325,6 @@ class _RendezvousState:
     wait_list: set[_NodeDesc]
     redundancy_list: set[_NodeDesc]
     last_heartbeats: dict[_NodeDesc, datetime]
-    worker_states: dict[_NodeDesc, int]
 
     def __init__(self) -> None:
         self.round = 0
@@ -346,12 +335,6 @@ class _RendezvousState:
         self.wait_list = set()
         self.redundancy_list = set()
         self.last_heartbeats = {}
-        self.worker_states = {}
-
-
-def _is_final_workers_state(state: WorkerState) -> bool:
-    # Final worker group state once reached will not be changed
-    return state in {WorkerState.SUCCEEDED, WorkerState.FAILED, WorkerState.UNKNOWN}
 
 
 def _remove_participant_epilogue(state: _RendezvousState, settings: RendezvousSettings) -> None:
@@ -545,10 +528,6 @@ class _BackendRendezvousStateHolder(_RendezvousStateHolder):
                 state.redundancy_list.remove(dead_node)
             except KeyError:
                 pass
-
-            if dead_node in state.worker_states:
-                if not _is_final_workers_state(state.worker_states[dead_node]):
-                    state.worker_states[dead_node] = WorkerState.UNKNOWN
 
         if participant_removed:
             # Common epilogue shared with the _remove_from_participants()
@@ -921,9 +900,6 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
         # Will try to preserve node<->rank mapping
         state.participants = self._assign_ranks(state.participants, self._prev_participants)
 
-        # Set initial worker states, assume all workers are healthy at the beginning
-        state.worker_states = {n: WorkerState.HEALTHY for n in state.participants}
-
     def _mark_rendezvous_closed(self) -> None:
         msg = (
             f"The node '{self._node}' marked the rendezvous '{self._settings.run_id}' as closed. "
@@ -945,53 +921,15 @@ def _should_keep_alive(ctx: _RendezvousContext) -> bool:
     return last_heartbeat <= datetime.utcnow() - ctx.settings.keep_alive_interval
 
 
-class _SetWorkersStateOp:
-
-    def __init__(self, target_state: WorkerState):
-        self.target_state = target_state
-        self.curr_state = None
-
-    def __call__(self, ctx: _RendezvousContext, deadline: float) -> _Action:
-        # try to set the target state for a worker group.
-        # if it reached another final state do not modify it.
-        self.curr_state = ctx.state.worker_states[ctx.node]
-        if self.curr_state == self.target_state or _is_final_workers_state(self.curr_state):
-            return _Action.FINISH
-        else:
-            if time.monotonic() > deadline:
-                return _Action.ERROR_TIMEOUT
-            ctx.state.worker_states[ctx.node] = self.target_state
-            return _Action.KEEP_ALIVE
-
-
 class _RendezvousExitOp:
     """Represent a rendezvous exit operation."""
 
-    def __init__(self, remove_from_all=False):
-        self._remove_from_all = remove_from_all
-
     def __call__(self, ctx: _RendezvousContext, deadline: float) -> _Action:
-        # If workers of the node being removed did not reach a final state mark it as UNKNOWN
-        # useful e.g. when leaving an agent due to a signal, and its workers are still HEALTHY.
-        curr_state = ctx.state.worker_states.get(ctx.node, None)
-        if curr_state is not None and not _is_final_workers_state(curr_state):
-            ctx.state.worker_states[ctx.node] = WorkerState.UNKNOWN
-            return _Action.KEEP_ALIVE  # keep alive to force the rdzv state sync
         if ctx.node in ctx.state.participants:
-            # always remove from participants
-            return self._action_or_timeout(_Action.REMOVE_FROM_PARTICIPANTS, deadline)
-        if self._remove_from_all:
-            # optionally remove from other lists
-            if ctx.node in ctx.state.redundancy_list:
-                return self._action_or_timeout(_Action.REMOVE_FROM_REDUNDANCY_LIST, deadline)
-            if ctx.node in ctx.state.wait_list:
-                return self._action_or_timeout(_Action.REMOVE_FROM_WAIT_LIST, deadline)
+            if time.monotonic() > deadline:
+                return _Action.ERROR_TIMEOUT
+            return _Action.REMOVE_FROM_PARTICIPANTS
         return _Action.FINISH
-
-    def _action_or_timeout(self, action, deadline):
-        if time.monotonic() > deadline:
-            return _Action.ERROR_TIMEOUT
-        return action
 
 
 class _RendezvousJoinOp:
@@ -1078,6 +1016,7 @@ class _RendezvousJoinOp:
             if (
                 len(state.participants) >= ctx.settings.min_nodes
                 and len(state.participants) <= ctx.settings.max_nodes
+                and state.deadline is not None
             ):
                 if state.deadline < datetime.now(timezone.utc):
                     msg = (
@@ -1405,56 +1344,6 @@ class FtRendezvousHandler(RendezvousHandler):
         try:
             with self._heartbeat_lock:
                 self._close()
-        except Exception as e:
-            self._record(
-                message=f"{type(e).__name__}: {str(e)}",
-                node_state=NodeState.FAILED,
-            )
-            raise
-
-    def remove_this_node(self):
-        """Remove this node from all rendezvous lists"""
-        try:
-            with self._heartbeat_lock:
-                op = _RendezvousExitOp(remove_from_all=True)
-                deadline = self._get_deadline(3 * self._settings.timeout.heartbeat)
-                self._op_executor.run(op, deadline)
-        except Exception as e:
-            self._record(
-                message=f"{type(e).__name__}: {str(e)}",
-                node_state=NodeState.FAILED,
-            )
-            raise
-
-    def try_set_worker_state(self, target_state: WorkerState) -> WorkerState:
-        """Try to set worker group state for this node. This might not succeed
-        if the worker group state was set into a different final state.
-        Args:
-            target_state (WorkerState): target state to be set.
-        Returns:
-            WorkerState: state set in the rendezvous at the end of the call.
-                In the current implementation, it can be either the desired target state or
-                WorkerState.UNKNOWN in case of the node being marked as dead by other
-                rdzv participants.
-        """
-        try:
-            with self._heartbeat_lock:
-                set_state_op = _SetWorkersStateOp(target_state)
-                deadline = self._get_deadline(3 * self._settings.timeout.heartbeat)
-                self._op_executor.run(set_state_op, deadline)
-                return set_state_op.curr_state
-        except Exception as e:
-            self._record(
-                message=f"{type(e).__name__}: {str(e)}",
-                node_state=NodeState.FAILED,
-            )
-            raise
-
-    def get_worker_states(self) -> dict[_NodeDesc, WorkerState]:
-        try:
-            with self._heartbeat_lock:
-                self._state_holder.sync()
-                return self._state_holder.state.worker_states.copy()
         except Exception as e:
             self._record(
                 message=f"{type(e).__name__}: {str(e)}",
