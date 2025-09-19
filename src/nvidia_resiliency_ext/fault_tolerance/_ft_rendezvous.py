@@ -1301,33 +1301,6 @@ class FtRendezvousHandler(RendezvousHandler):
             log.debug("RendezvousInfo not available, using tuple format")
             return store, rank, world_size
 
-    def is_closed(self) -> bool:
-        """See base class."""
-        try:
-            with self._heartbeat_lock:
-                self._state_holder.sync()
-
-                return self._state_holder.state.closed
-
-        except Exception as e:
-            self._record(
-                message=f"{type(e).__name__}: {str(e)}",
-                node_state=NodeState.FAILED,
-            )
-            raise
-
-    def set_closed(self) -> None:
-        """See base class."""
-        try:
-            with self._heartbeat_lock:
-                self._close()
-        except Exception as e:
-            self._record(
-                message=f"{type(e).__name__}: {str(e)}",
-                node_state=NodeState.FAILED,
-            )
-            raise
-
     def num_nodes_waiting(self) -> int:
         """See base class."""
         try:
@@ -1336,38 +1309,6 @@ class FtRendezvousHandler(RendezvousHandler):
 
                 return len(self._state_holder.state.wait_list)
 
-        except Exception as e:
-            self._record(
-                message=f"{type(e).__name__}: {str(e)}",
-                node_state=NodeState.FAILED,
-            )
-            raise
-
-    def num_nodes(self) -> int:
-        """Get num nodes in participants + wait_list + redundancy_list"""
-        try:
-            with self._heartbeat_lock:
-                self._state_holder.sync()
-
-                return (
-                    len(self._state_holder.state.participants)
-                    + len(self._state_holder.state.wait_list)
-                    + len(self._state_holder.state.redundancy_list)
-                )
-
-        except Exception as e:
-            self._record(
-                message=f"{type(e).__name__}: {str(e)}",
-                node_state=NodeState.FAILED,
-            )
-            raise
-
-    def round(self) -> int:
-        """Get rendezvous round"""
-        try:
-            with self._heartbeat_lock:
-                self._state_holder.sync()
-                return self._state_holder.state.round
         except Exception as e:
             self._record(
                 message=f"{type(e).__name__}: {str(e)}",
