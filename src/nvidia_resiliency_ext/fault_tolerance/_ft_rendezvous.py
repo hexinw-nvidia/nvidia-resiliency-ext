@@ -29,12 +29,11 @@ import time
 import weakref
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union, cast
+from typing import Any, Callable, Optional, Union
 
 from torch.distributed import PrefixStore, Store
-from torch.distributed.elastic.agent.server.api import WorkerState
 from torch.distributed.elastic.events import NodeState, construct_and_record_rdzv_event
 from torch.distributed.elastic.rendezvous.api import (
     RendezvousClosedError,
@@ -86,7 +85,7 @@ class RendezvousBackend(ABC):
         """Get the name of the backend."""
 
     @abstractmethod
-    def get_state(self) -> Optional[Tuple[bytes, Token]]:
+    def get_state(self) -> Optional[tuple[bytes, Token]]:
         """Get the rendezvous state.
 
         Returns:
@@ -103,7 +102,7 @@ class RendezvousBackend(ABC):
     @abstractmethod
     def set_state(
         self, state: bytes, token: Optional[Token] = None
-    ) -> Optional[Tuple[bytes, Token, bool]]:
+    ) -> Optional[tuple[bytes, Token, bool]]:
         """Set the rendezvous state.
 
         The new rendezvous state is set conditionally:
@@ -227,11 +226,6 @@ class RendezvousSettings:
         keep_alive_max_attempt:
             The maximum number of failed heartbeat attempts after which a node
             is considered dead.
-        upscaling_enabled:
-            Whether a completed rendezvous, which does not have max_nodes, can be upscaled.
-            If set to True (default), nodes from the redundancy list and new arrivals are migrated
-            to the wait list. If set to False, new arrivals will be moved to the redundancy list
-            and will wait there until the next rendezvous round.
     """
 
     run_id: str
@@ -240,7 +234,6 @@ class RendezvousSettings:
     timeout: RendezvousTimeout
     keep_alive_interval: timedelta
     keep_alive_max_attempt: int
-    upscaling_enabled: bool = True
 
 
 @dataclass(eq=True, order=True, frozen=True)
@@ -315,27 +308,16 @@ class _RendezvousState:
             the next rendezvous without triggering re-rendezvous.
         last_heartbeats:
             A dictionary containing each node's last heartbeat time.
-        worker_states:
-            A dictionary containing each node's worker group state.
-            Possible group states are:
-            - WorkerState.HEALTHY: all workers are running normally.
-            - WorkerState.UNHEALTHY: at least one worker failed, but some workers are still running
-            - WorkerState.SUCCEEDED: all workers succeeded
-            - WorkerState.FAILED: at least one worker failed, all workers completed
-            - WorkerState.UNKNOWN: node did not send heartbeats
-            WorkerState.SUCCEEDED, WorkerState.FAILED, WorkerState.UNKNOWN are final states:
-            once set, they can't be changed.
     """
 
     round: int
     complete: bool
     deadline: Optional[datetime]
     closed: bool
-    participants: Dict[_NodeDesc, int]
-    wait_list: Set[_NodeDesc]
-    redundancy_list: Set[_NodeDesc]
-    last_heartbeats: Dict[_NodeDesc, datetime]
-    worker_states: Dict[_NodeDesc, int]
+    participants: dict[_NodeDesc, int]
+    wait_list: set[_NodeDesc]
+    redundancy_list: set[_NodeDesc]
+    last_heartbeats: dict[_NodeDesc, datetime]
 
     def __init__(self) -> None:
         self.round = 0
@@ -346,12 +328,6 @@ class _RendezvousState:
         self.wait_list = set()
         self.redundancy_list = set()
         self.last_heartbeats = {}
-        self.worker_states = {}
-
-
-def _is_final_workers_state(state: WorkerState) -> bool:
-    # Final worker group state once reached will not be changed
-    return state in {WorkerState.SUCCEEDED, WorkerState.FAILED, WorkerState.UNKNOWN}
 
 
 def _remove_participant_epilogue(state: _RendezvousState, settings: RendezvousSettings) -> None:
@@ -415,7 +391,7 @@ class _BackendRendezvousStateHolder(_RendezvousStateHolder):
     _token: Token
     _dirty: bool
     _last_sync_time: float
-    _dead_nodes: List[_NodeDesc]
+    _dead_nodes: list[_NodeDesc]
 
     def __init__(
         self,
@@ -546,10 +522,6 @@ class _BackendRendezvousStateHolder(_RendezvousStateHolder):
             except KeyError:
                 pass
 
-            if dead_node in state.worker_states:
-                if not _is_final_workers_state(state.worker_states[dead_node]):
-                    state.worker_states[dead_node] = WorkerState.UNKNOWN
-
         if participant_removed:
             # Common epilogue shared with the _remove_from_participants()
             # function of _DistributedRendezvousOpExecutor.
@@ -655,7 +627,7 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
     _state: _RendezvousState
     _state_holder: _RendezvousStateHolder
     _settings: RendezvousSettings
-    _prev_participants: Dict[_NodeDesc, int]
+    _prev_participants: dict[_NodeDesc, int]
     _prev_round: Optional[int]
 
     def __init__(
@@ -873,8 +845,8 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
 
     @staticmethod
     def _assign_ranks(
-        participants: Dict[_NodeDesc, int], prev: Dict[_NodeDesc, int]
-    ) -> Dict[_NodeDesc, int]:
+        participants: dict[_NodeDesc, int], prev: dict[_NodeDesc, int]
+    ) -> dict[_NodeDesc, int]:
         # Assign ranks. Re-use assigment from the previous round as much as possible
         world_size = len(participants)
         sorted_keys = sorted(participants.keys())
@@ -921,9 +893,6 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
         # Will try to preserve node<->rank mapping
         state.participants = self._assign_ranks(state.participants, self._prev_participants)
 
-        # Set initial worker states, assume all workers are healthy at the beginning
-        state.worker_states = {n: WorkerState.HEALTHY for n in state.participants}
-
     def _mark_rendezvous_closed(self) -> None:
         msg = (
             f"The node '{self._node}' marked the rendezvous '{self._settings.run_id}' as closed. "
@@ -945,53 +914,15 @@ def _should_keep_alive(ctx: _RendezvousContext) -> bool:
     return last_heartbeat <= datetime.utcnow() - ctx.settings.keep_alive_interval
 
 
-class _SetWorkersStateOp:
-
-    def __init__(self, target_state: WorkerState):
-        self.target_state = target_state
-        self.curr_state = None
-
-    def __call__(self, ctx: _RendezvousContext, deadline: float) -> _Action:
-        # try to set the target state for a worker group.
-        # if it reached another final state do not modify it.
-        self.curr_state = ctx.state.worker_states[ctx.node]
-        if self.curr_state == self.target_state or _is_final_workers_state(self.curr_state):
-            return _Action.FINISH
-        else:
-            if time.monotonic() > deadline:
-                return _Action.ERROR_TIMEOUT
-            ctx.state.worker_states[ctx.node] = self.target_state
-            return _Action.KEEP_ALIVE
-
-
 class _RendezvousExitOp:
     """Represent a rendezvous exit operation."""
 
-    def __init__(self, remove_from_all=False):
-        self._remove_from_all = remove_from_all
-
     def __call__(self, ctx: _RendezvousContext, deadline: float) -> _Action:
-        # If workers of the node being removed did not reach a final state mark it as UNKNOWN
-        # useful e.g. when leaving an agent due to a signal, and its workers are still HEALTHY.
-        curr_state = ctx.state.worker_states.get(ctx.node, None)
-        if curr_state is not None and not _is_final_workers_state(curr_state):
-            ctx.state.worker_states[ctx.node] = WorkerState.UNKNOWN
-            return _Action.KEEP_ALIVE  # keep alive to force the rdzv state sync
         if ctx.node in ctx.state.participants:
-            # always remove from participants
-            return self._action_or_timeout(_Action.REMOVE_FROM_PARTICIPANTS, deadline)
-        if self._remove_from_all:
-            # optionally remove from other lists
-            if ctx.node in ctx.state.redundancy_list:
-                return self._action_or_timeout(_Action.REMOVE_FROM_REDUNDANCY_LIST, deadline)
-            if ctx.node in ctx.state.wait_list:
-                return self._action_or_timeout(_Action.REMOVE_FROM_WAIT_LIST, deadline)
+            if time.monotonic() > deadline:
+                return _Action.ERROR_TIMEOUT
+            return _Action.REMOVE_FROM_PARTICIPANTS
         return _Action.FINISH
-
-    def _action_or_timeout(self, action, deadline):
-        if time.monotonic() > deadline:
-            return _Action.ERROR_TIMEOUT
-        return action
 
 
 class _RendezvousJoinOp:
@@ -1017,17 +948,10 @@ class _RendezvousJoinOp:
                 else:
                     return _Action.SYNC
             else:
-                if ctx.state.complete and not ctx.settings.upscaling_enabled:
-                    msg = f"The node {ctx.node} kept on redundancy list, due to upscaling_enabled=False"
-                    log.debug(msg)
-                    if _should_keep_alive(ctx):
-                        return _Action.KEEP_ALIVE
-                    return _Action.SYNC
-                else:
-                    # transition to waiting state that will respect timeouts.
-                    msg = f"The node {ctx.node} is removed from redunancy list"
-                    log.debug(msg)
-                    return _Action.REMOVE_FROM_REDUNDANCY_LIST
+                # transition to waiting state that will respect timeouts.
+                msg = f"The node {ctx.node} is removed from redunancy list"
+                log.debug(msg)
+                return _Action.REMOVE_FROM_REDUNDANCY_LIST
 
         is_participant = ctx.node in state.participants
 
@@ -1060,14 +984,9 @@ class _RendezvousJoinOp:
             # case the rendezvous has capacity for additional participants add
             # ourself to the wait list for the next round.
             if len(state.participants) < ctx.settings.max_nodes:
-                if ctx.settings.upscaling_enabled:
-                    # default: upscale the existing rendezvous
-                    if ctx.node not in state.wait_list:
-                        return _Action.ADD_TO_WAIT_LIST
-                else:
-                    # do not want to upscale completed rendezvous
-                    if ctx.node not in state.redundancy_list and ctx.node not in state.wait_list:
-                        return _Action.ADD_TO_REDUNDANCY_LIST
+                # upscale the existing rendezvous (always enabled)
+                if ctx.node not in state.wait_list:
+                    return _Action.ADD_TO_WAIT_LIST
             elif len(state.participants) >= ctx.settings.max_nodes:
                 if ctx.node not in state.redundancy_list and ctx.node not in state.wait_list:
                     return _Action.ADD_TO_REDUNDANCY_LIST
@@ -1078,8 +997,9 @@ class _RendezvousJoinOp:
             if (
                 len(state.participants) >= ctx.settings.min_nodes
                 and len(state.participants) <= ctx.settings.max_nodes
+                and state.deadline is not None
             ):
-                if cast(datetime, state.deadline) < datetime.utcnow():
+                if state.deadline < datetime.now(timezone.utc):
                     msg = (
                         f"The node '{ctx.node}' marking the rendezvous complete, "
                         f"quorum established within deadline"
@@ -1154,7 +1074,6 @@ class FtRendezvousHandler(RendezvousHandler):
         max_nodes: int,
         local_addr: Optional[str] = None,
         timeout: Optional[RendezvousTimeout] = None,
-        upscaling_enabled: bool = True,
     ):
         """Create a new :py:class:`FtRendezvousHandler`.
 
@@ -1173,8 +1092,6 @@ class FtRendezvousHandler(RendezvousHandler):
                 The local node address.
             timeout:
                 The timeout configuration of the rendezvous.
-            upscaling_enabled:
-                Whether to enable upscaling of a completed rendezvous with redundant or new nodes.
         """
         # We associate each handler instance with a unique node descriptor.
         node = cls._node_desc_generator.generate(local_addr)
@@ -1186,7 +1103,6 @@ class FtRendezvousHandler(RendezvousHandler):
             timeout or RendezvousTimeout(),
             keep_alive_interval=timedelta(seconds=5),
             keep_alive_max_attempt=3,
-            upscaling_enabled=upscaling_enabled,
         )
 
         state_holder = _BackendRendezvousStateHolder(backend, settings)
@@ -1307,7 +1223,7 @@ class FtRendezvousHandler(RendezvousHandler):
                 f"Node {self._this_node} is excluded from the training due to an user request."
             )
 
-    def next_rendezvous(self) -> Union[RendezvousInfo, Tuple[Store, int, int]]:
+    def next_rendezvous(self) -> Union[RendezvousInfo, tuple[Store, int, int]]:
         """See base class.
 
         Returns:
@@ -1405,56 +1321,6 @@ class FtRendezvousHandler(RendezvousHandler):
         try:
             with self._heartbeat_lock:
                 self._close()
-        except Exception as e:
-            self._record(
-                message=f"{type(e).__name__}: {str(e)}",
-                node_state=NodeState.FAILED,
-            )
-            raise
-
-    def remove_this_node(self):
-        """Remove this node from all rendezvous lists"""
-        try:
-            with self._heartbeat_lock:
-                op = _RendezvousExitOp(remove_from_all=True)
-                deadline = self._get_deadline(3 * self._settings.timeout.heartbeat)
-                self._op_executor.run(op, deadline)
-        except Exception as e:
-            self._record(
-                message=f"{type(e).__name__}: {str(e)}",
-                node_state=NodeState.FAILED,
-            )
-            raise
-
-    def try_set_worker_state(self, target_state: WorkerState) -> WorkerState:
-        """Try to set worker group state for this node. This might not succeed
-        if the worker group state was set into a different final state.
-        Args:
-            target_state (WorkerState): target state to be set.
-        Returns:
-            WorkerState: state set in the rendezvous at the end of the call.
-                In the current implementation, it can be either the desired target state or
-                WorkerState.UNKNOWN in case of the node being marked as dead by other
-                rdzv participants.
-        """
-        try:
-            with self._heartbeat_lock:
-                set_state_op = _SetWorkersStateOp(target_state)
-                deadline = self._get_deadline(3 * self._settings.timeout.heartbeat)
-                self._op_executor.run(set_state_op, deadline)
-                return set_state_op.curr_state
-        except Exception as e:
-            self._record(
-                message=f"{type(e).__name__}: {str(e)}",
-                node_state=NodeState.FAILED,
-            )
-            raise
-
-    def get_worker_states(self) -> Dict[_NodeDesc, WorkerState]:
-        try:
-            with self._heartbeat_lock:
-                self._state_holder.sync()
-                return self._state_holder.state.worker_states.copy()
         except Exception as e:
             self._record(
                 message=f"{type(e).__name__}: {str(e)}",
@@ -1595,7 +1461,7 @@ class FtRendezvousHandler(RendezvousHandler):
 
         self._keep_alive_timer.cancel()
 
-    def _get_world(self) -> Tuple[int, int]:
+    def _get_world(self) -> tuple[int, int]:
         state = self._state_holder.state
 
         return state.participants[self._this_node], len(state.participants)
@@ -1652,9 +1518,6 @@ def create_handler(
             _get_timeout(params, "close"),
         )
 
-        # torchrun default behaviour if not specified otherwise
-        upscale_completed = params.config.get('upscaling_enabled', True)
-
         return FtRendezvousHandler.from_backend(
             params.run_id,
             store,
@@ -1663,7 +1526,6 @@ def create_handler(
             params.max_nodes,
             params.local_addr,
             timeout,
-            upscaling_enabled=upscale_completed,
         )
     except Exception as e:
         construct_and_record_rdzv_event(
