@@ -53,16 +53,14 @@ via a YAML file using ``--ft-cfg-path`` or through command-line parameters
 using ``--ft-<parameter-name>``.
 
 If ``--max-restarts`` is specified, the launcher restarts failed workers.
-The restart behavior depends on the ``--ft-restart-policy`` parameter, which supports two modes:
+The launcher uses the ``any-failed`` restart policy:
 
-* ``any-failed`` (default)  
-  All workers are restarted if any worker fails.  
+* ``any-failed``  
+  All workers are restarted if any worker fails.
 
-* ``min-healthy``
-  Workers are restarted when the number of healthy nodes (nodes where all worker processes are running) 
-  falls below the minimum specified in ``--nnodes``. This allows for some worker failures to be handled 
-  without restarting remaining workers, e.g., with the :doc:`../inprocess/index`.
-  For details on how ``min-healthy`` policy interacts with :doc:`../inprocess/index` see :doc:`integration/inprocess`.
+.. note::
+
+   The ``--ft-restart-policy`` argument is deprecated and will be removed in a future release. The FT launcher now only supports the ``any-failed`` restart policy.
   
 
 Hang detection
