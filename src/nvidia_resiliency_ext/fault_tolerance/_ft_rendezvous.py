@@ -227,11 +227,6 @@ class RendezvousSettings:
         keep_alive_max_attempt:
             The maximum number of failed heartbeat attempts after which a node
             is considered dead.
-        upscaling_enabled:
-            Whether a completed rendezvous, which does not have max_nodes, can be upscaled.
-            If set to True (default), nodes from the redundancy list and new arrivals are migrated
-            to the wait list. If set to False, new arrivals will be moved to the redundancy list
-            and will wait there until the next rendezvous round.
     """
 
     run_id: str
@@ -240,7 +235,6 @@ class RendezvousSettings:
     timeout: RendezvousTimeout
     keep_alive_interval: timedelta
     keep_alive_max_attempt: int
-    upscaling_enabled: bool = True
 
 
 @dataclass(eq=True, order=True, frozen=True)
@@ -1017,17 +1011,10 @@ class _RendezvousJoinOp:
                 else:
                     return _Action.SYNC
             else:
-                if ctx.state.complete and not ctx.settings.upscaling_enabled:
-                    msg = f"The node {ctx.node} kept on redundancy list, due to upscaling_enabled=False"
-                    log.debug(msg)
-                    if _should_keep_alive(ctx):
-                        return _Action.KEEP_ALIVE
-                    return _Action.SYNC
-                else:
-                    # transition to waiting state that will respect timeouts.
-                    msg = f"The node {ctx.node} is removed from redunancy list"
-                    log.debug(msg)
-                    return _Action.REMOVE_FROM_REDUNDANCY_LIST
+                # transition to waiting state that will respect timeouts.
+                msg = f"The node {ctx.node} is removed from redunancy list"
+                log.debug(msg)
+                return _Action.REMOVE_FROM_REDUNDANCY_LIST
 
         is_participant = ctx.node in state.participants
 
@@ -1060,14 +1047,9 @@ class _RendezvousJoinOp:
             # case the rendezvous has capacity for additional participants add
             # ourself to the wait list for the next round.
             if len(state.participants) < ctx.settings.max_nodes:
-                if ctx.settings.upscaling_enabled:
-                    # default: upscale the existing rendezvous
-                    if ctx.node not in state.wait_list:
-                        return _Action.ADD_TO_WAIT_LIST
-                else:
-                    # do not want to upscale completed rendezvous
-                    if ctx.node not in state.redundancy_list and ctx.node not in state.wait_list:
-                        return _Action.ADD_TO_REDUNDANCY_LIST
+                # upscale the existing rendezvous (always enabled)
+                if ctx.node not in state.wait_list:
+                    return _Action.ADD_TO_WAIT_LIST
             elif len(state.participants) >= ctx.settings.max_nodes:
                 if ctx.node not in state.redundancy_list and ctx.node not in state.wait_list:
                     return _Action.ADD_TO_REDUNDANCY_LIST
@@ -1154,7 +1136,6 @@ class FtRendezvousHandler(RendezvousHandler):
         max_nodes: int,
         local_addr: Optional[str] = None,
         timeout: Optional[RendezvousTimeout] = None,
-        upscaling_enabled: bool = True,
     ):
         """Create a new :py:class:`FtRendezvousHandler`.
 
@@ -1173,8 +1154,6 @@ class FtRendezvousHandler(RendezvousHandler):
                 The local node address.
             timeout:
                 The timeout configuration of the rendezvous.
-            upscaling_enabled:
-                Whether to enable upscaling of a completed rendezvous with redundant or new nodes.
         """
         # We associate each handler instance with a unique node descriptor.
         node = cls._node_desc_generator.generate(local_addr)
@@ -1186,7 +1165,6 @@ class FtRendezvousHandler(RendezvousHandler):
             timeout or RendezvousTimeout(),
             keep_alive_interval=timedelta(seconds=5),
             keep_alive_max_attempt=3,
-            upscaling_enabled=upscaling_enabled,
         )
 
         state_holder = _BackendRendezvousStateHolder(backend, settings)
@@ -1652,9 +1630,6 @@ def create_handler(
             _get_timeout(params, "close"),
         )
 
-        # torchrun default behaviour if not specified otherwise
-        upscale_completed = params.config.get('upscaling_enabled', True)
-
         return FtRendezvousHandler.from_backend(
             params.run_id,
             store,
@@ -1663,7 +1638,6 @@ def create_handler(
             params.max_nodes,
             params.local_addr,
             timeout,
-            upscaling_enabled=upscale_completed,
         )
     except Exception as e:
         construct_and_record_rdzv_event(
