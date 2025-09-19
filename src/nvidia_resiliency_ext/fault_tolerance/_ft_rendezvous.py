@@ -29,9 +29,9 @@ import time
 import weakref
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union, cast
+from typing import Any, Callable, Optional, Union
 
 from torch.distributed import PrefixStore, Store
 from torch.distributed.elastic.agent.server.api import WorkerState
@@ -86,7 +86,7 @@ class RendezvousBackend(ABC):
         """Get the name of the backend."""
 
     @abstractmethod
-    def get_state(self) -> Optional[Tuple[bytes, Token]]:
+    def get_state(self) -> Optional[tuple[bytes, Token]]:
         """Get the rendezvous state.
 
         Returns:
@@ -103,7 +103,7 @@ class RendezvousBackend(ABC):
     @abstractmethod
     def set_state(
         self, state: bytes, token: Optional[Token] = None
-    ) -> Optional[Tuple[bytes, Token, bool]]:
+    ) -> Optional[tuple[bytes, Token, bool]]:
         """Set the rendezvous state.
 
         The new rendezvous state is set conditionally:
@@ -331,11 +331,11 @@ class _RendezvousState:
     complete: bool
     deadline: Optional[datetime]
     closed: bool
-    participants: Dict[_NodeDesc, int]
-    wait_list: Set[_NodeDesc]
-    redundancy_list: Set[_NodeDesc]
-    last_heartbeats: Dict[_NodeDesc, datetime]
-    worker_states: Dict[_NodeDesc, int]
+    participants: dict[_NodeDesc, int]
+    wait_list: set[_NodeDesc]
+    redundancy_list: set[_NodeDesc]
+    last_heartbeats: dict[_NodeDesc, datetime]
+    worker_states: dict[_NodeDesc, int]
 
     def __init__(self) -> None:
         self.round = 0
@@ -415,7 +415,7 @@ class _BackendRendezvousStateHolder(_RendezvousStateHolder):
     _token: Token
     _dirty: bool
     _last_sync_time: float
-    _dead_nodes: List[_NodeDesc]
+    _dead_nodes: list[_NodeDesc]
 
     def __init__(
         self,
@@ -655,7 +655,7 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
     _state: _RendezvousState
     _state_holder: _RendezvousStateHolder
     _settings: RendezvousSettings
-    _prev_participants: Dict[_NodeDesc, int]
+    _prev_participants: dict[_NodeDesc, int]
     _prev_round: Optional[int]
 
     def __init__(
@@ -873,8 +873,8 @@ class _DistributedRendezvousOpExecutor(_RendezvousOpExecutor):
 
     @staticmethod
     def _assign_ranks(
-        participants: Dict[_NodeDesc, int], prev: Dict[_NodeDesc, int]
-    ) -> Dict[_NodeDesc, int]:
+        participants: dict[_NodeDesc, int], prev: dict[_NodeDesc, int]
+    ) -> dict[_NodeDesc, int]:
         # Assign ranks. Re-use assigment from the previous round as much as possible
         world_size = len(participants)
         sorted_keys = sorted(participants.keys())
@@ -1079,7 +1079,7 @@ class _RendezvousJoinOp:
                 len(state.participants) >= ctx.settings.min_nodes
                 and len(state.participants) <= ctx.settings.max_nodes
             ):
-                if cast(datetime, state.deadline) < datetime.utcnow():
+                if state.deadline < datetime.now(timezone.utc):
                     msg = (
                         f"The node '{ctx.node}' marking the rendezvous complete, "
                         f"quorum established within deadline"
@@ -1307,7 +1307,7 @@ class FtRendezvousHandler(RendezvousHandler):
                 f"Node {self._this_node} is excluded from the training due to an user request."
             )
 
-    def next_rendezvous(self) -> Union[RendezvousInfo, Tuple[Store, int, int]]:
+    def next_rendezvous(self) -> Union[RendezvousInfo, tuple[Store, int, int]]:
         """See base class.
 
         Returns:
@@ -1450,7 +1450,7 @@ class FtRendezvousHandler(RendezvousHandler):
             )
             raise
 
-    def get_worker_states(self) -> Dict[_NodeDesc, WorkerState]:
+    def get_worker_states(self) -> dict[_NodeDesc, WorkerState]:
         try:
             with self._heartbeat_lock:
                 self._state_holder.sync()
@@ -1595,7 +1595,7 @@ class FtRendezvousHandler(RendezvousHandler):
 
         self._keep_alive_timer.cancel()
 
-    def _get_world(self) -> Tuple[int, int]:
+    def _get_world(self) -> tuple[int, int]:
         state = self._state_holder.state
 
         return state.participants[self._this_node], len(state.participants)
