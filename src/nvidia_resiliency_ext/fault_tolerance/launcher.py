@@ -484,6 +484,10 @@ class LocalElasticAgent(SimpleElasticAgent):
         return f"{tempfile.gettempdir()}/_ft_launcher{os.getpid()}_rmon{local_rank}.socket"
 
     def setup_rank_monitors(self, envs: Dict[int, Dict[str, str]]) -> None:
+        # Skip rank monitor setup if disabled in configuration
+        if not self._ft_cfg.enable_rank_monitors:
+            return
+
         fork_mp_ctx = torch.multiprocessing.get_context("fork")
         for worker_env in envs.values():
             # Start rank monitors if not already started
@@ -1859,6 +1863,15 @@ def get_args_parser() -> ArgumentParser:
         default=True,
         dest="ft_enable_nic_monitor",
         help="Enable or Disable NIC health monitoring in training.",
+    )
+
+    parser.add_argument(
+        "--ft-enable-rank-monitors",
+        "--ft-enable_rank_monitors",
+        type=lambda x: str(x).lower() in ["true", "1", "yes"],
+        default=True,
+        dest="ft_enable_rank_monitors",
+        help="Enable or disable rank monitor setup. When disabled, rank monitors will not be started, which is useful for simulation environments.",
     )
 
     parser.add_argument(
