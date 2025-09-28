@@ -462,11 +462,6 @@ class _BackendRendezvousStateHolder(_RendezvousStateHolder):
             set_response = self._backend.set_state(state_bits, self._token)
             if set_response is not None:
                 state_bits, token, has_set = set_response
-                # Add random delay on CAS failure to reduce thundering herd effect
-                # This spreads out retry attempts when multiple nodes compete for the same state update
-                # Delay is applied outside the lock to avoid blocking other threads
-                if not has_set:
-                    _delay(seconds=(0, 0.1))
         else:
             has_set = None
 
