@@ -61,6 +61,9 @@ class FaultToleranceConfig:
       Reads from SLURM_PROCID (in SLURM environments) or GROUP_RANK (set by launcher). Previous
       rank assignments are ignored to ensure consistency with infrastructure's rank assignment.
       Note: Hot spare/redundancy is NOT supported with this setting. Default: True.
+    * `enable_gpu_memory_check` - If True, log GPU memory usage after worker shutdown to detect
+      potential memory leaks. This is disabled by default as CUDA memory leaks are less likely
+      in ft_launcher. Default: False.
 
     If any timeout is None, it has no effect (as if it was +INF).
     All timeouts can be deduced and set during runtime.
@@ -81,6 +84,7 @@ class FaultToleranceConfig:
     link_down_path_template: Optional[str] = None
     skip_section_response: bool = True
     use_infra_group_rank: bool = True
+    enable_gpu_memory_check: bool = False
 
     @staticmethod
     def from_kwargs(ignore_not_recognized: bool = True, **kwargs) -> 'FaultToleranceConfig':

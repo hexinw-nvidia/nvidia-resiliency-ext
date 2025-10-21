@@ -76,6 +76,7 @@ from nvidia_resiliency_ext.fault_tolerance.utils import (
     write_obj_to_ipc_stream,
 )
 from nvidia_resiliency_ext.shared_utils.log_manager import LogConfig, setup_logger
+from nvidia_resiliency_ext.shared_utils.memory import GPUMemoryLogger
 from nvidia_resiliency_ext.shared_utils.profiling import ProfilingEvent, record_profiling_event
 
 # Deprecation warning for FT_LAUNCHER_LOGLEVEL
@@ -606,6 +607,14 @@ class LocalElasticAgent(SimpleElasticAgent):
                 logger.warning(f"Failed to send close message to rank monitor {local_rank}: {e}")
 
         self._shutdown(timeout=self._workers_stop_timeout)
+
+        # Log GPU memory usage for all devices on this node after workers are stopped
+        # This check is optional and disabled by default as CUDA memory leaks are less likely
+        if self._ft_cfg.enable_gpu_memory_check:
+            num_gpus = worker_group.spec.local_world_size
+            memory_logger = GPUMemoryLogger()
+            for device_idx in range(num_gpus):
+                memory_logger.log_gpu_memory(context="after_worker_shutdown", device_index=device_idx)
 
         # Record worker termination event after shutdown is complete
         record_profiling_event(
@@ -1903,6 +1912,18 @@ def get_args_parser() -> ArgumentParser:
         "Reads from SLURM_PROCID (SLURM) or GROUP_RANK (launcher). Previous assignments "
         "are ignored to ensure consistency with infrastructure rank assignment. "
         "Note: Hot spare/redundancy NOT supported. Default: True.",
+    )
+
+    parser.add_argument(
+        "--ft-enable-gpu-memory-check",
+        "--ft-enable_gpu_memory_check",
+        type=lambda x: str(x).lower() in ["true", "1", "yes"],
+        default=None,
+        dest="ft_enable_gpu_memory_check",
+        help="Part of Fault Tolerance pkg config (enable_gpu_memory_check). "
+        "If enabled, log GPU memory usage after worker shutdown to detect potential memory leaks. "
+        "This is disabled by default as CUDA memory leaks are less likely in ft_launcher. "
+        "Default: False.",
     )
 
     parser.add_argument(
