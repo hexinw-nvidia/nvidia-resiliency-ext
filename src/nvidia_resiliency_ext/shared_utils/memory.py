@@ -44,9 +44,9 @@ class GPUMemoryLogger(PynvmlMixin):
         self._initialized = True
 
     @with_pynvml_lock
-    def log_gpu_memory(self, context: str = "", device_index: int = None):
+    def get_gpu_memory(self, device_index: int = None, log_memory: bool = False, context: str = ""):
         """
-        Log GPU memory usage (used, free, total) for the specified device using pynvml.
+        Get GPU memory usage (used, free, total) for the specified device using pynvml.
 
         Uses the following device detection pattern:
         1. Use device_index if provided
@@ -54,11 +54,15 @@ class GPUMemoryLogger(PynvmlMixin):
         3. Raise RuntimeError if neither is available
 
         Args:
-            context (str): Optional context string to include in the log message
             device_index (int): Optional GPU device index. If None, uses LOCAL_RANK env variable.
+            log_memory (bool): If True, log the memory information. Default: False.
+            context (str): Optional context string to include in the log message (only used if log_memory=True).
+
+        Returns:
+            dict: Dictionary with keys 'total_mb', 'used_mb', 'free_mb' or None if pynvml not available
         """
         if not self._pynvml_available:
-            return
+            return None
 
         try:
             # Determine device: use device_index if provided, otherwise use LOCAL_RANK
@@ -83,14 +87,25 @@ class GPUMemoryLogger(PynvmlMixin):
             used_mb = memory_info.used / (1024 * 1024)
             free_mb = memory_info.free / (1024 * 1024)
 
-            context_str = f" ({context})" if context else ""
-            self.log.info(
-                f"GPU {device_id} Memory{context_str} - Total: {total_mb:.2f} MB, "
-                f"Used: {used_mb:.2f} MB, Free: {free_mb:.2f} MB"
-            )
+            # Log if requested
+            if log_memory:
+                context_str = f" ({context})" if context else ""
+                self.log.info(
+                    f"GPU {device_id} Memory{context_str} - Total: {total_mb:.2f} MB, "
+                    f"Used: {used_mb:.2f} MB, Free: {free_mb:.2f} MB"
+                )
+
+            return {
+                'total_mb': total_mb,
+                'used_mb': used_mb,
+                'free_mb': free_mb,
+            }
 
         except Exception as e:
-            self.log.error(f"Failed to log GPU memory information: {e}")
+            # Include device_index in error for clarity
+            device_str = f" (device_index={device_index})" if device_index is not None else ""
+            self.log.error(f"Failed to get GPU memory information{device_str}: {e}")
+            return None
         finally:
             try:
                 self.pynvml.nvmlShutdown()

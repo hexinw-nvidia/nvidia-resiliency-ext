@@ -61,9 +61,10 @@ class FaultToleranceConfig:
       Reads from SLURM_PROCID (in SLURM environments) or GROUP_RANK (set by launcher). Previous
       rank assignments are ignored to ensure consistency with infrastructure's rank assignment.
       Note: Hot spare/redundancy is NOT supported with this setting. Default: True.
-    * `enable_gpu_memory_check` - If True, log GPU memory usage after worker shutdown to detect
-      potential memory leaks. This is disabled by default as CUDA memory leaks are less likely
-      in ft_launcher. Default: False.
+    * `gpu_memory_reclaim_timeout` [float] timeout (in seconds) to wait for GPU memory to be reclaimed
+      after worker shutdown before starting new workers. Default: 10.0.
+    * `gpu_memory_tolerance_mb` [float] tolerance (in MB) for GPU memory comparison when checking if
+      memory has been reclaimed to baseline. Default: 50.0.
 
     If any timeout is None, it has no effect (as if it was +INF).
     All timeouts can be deduced and set during runtime.
@@ -84,7 +85,8 @@ class FaultToleranceConfig:
     link_down_path_template: Optional[str] = None
     skip_section_response: bool = True
     use_infra_group_rank: bool = True
-    enable_gpu_memory_check: bool = False
+    gpu_memory_reclaim_timeout: float = 10.0
+    gpu_memory_tolerance_mb: float = 50.0
 
     @staticmethod
     def from_kwargs(ignore_not_recognized: bool = True, **kwargs) -> 'FaultToleranceConfig':
@@ -214,6 +216,8 @@ class FaultToleranceConfig:
             'node_health_check_interval',
             'safety_factor',
             'restart_check_interval',
+            'gpu_memory_reclaim_timeout',
+            'gpu_memory_tolerance_mb',
         ]
         for field in fields(FaultToleranceConfig):
             cli_field_name = f"ft_{field.name}"
