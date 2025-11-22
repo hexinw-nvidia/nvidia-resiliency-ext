@@ -817,6 +817,7 @@ class LocalElasticAgent(SimpleElasticAgent):
         # Store memory stats per GPU per poll for logging
         memory_stats = {device_idx: [] for device_idx in range(num_gpus)}
         last_periodic_log_time = start_time
+        last_logged_sample_count = {device_idx: 0 for device_idx in range(num_gpus)}
 
         while time.time() - start_time < timeout:
             all_devices_ok = True
@@ -862,9 +863,13 @@ class LocalElasticAgent(SimpleElasticAgent):
                     current_time - start_time,
                     num_samples_to_show,
                     log_processes,
-                    is_final=False
+                    is_final=False,
+                    last_logged_sample_count=last_logged_sample_count
                 )
                 last_periodic_log_time = current_time
+                # Update the count of samples we've logged
+                for device_idx in range(num_gpus):
+                    last_logged_sample_count[device_idx] = len(memory_stats[device_idx])
 
             if all_devices_ok:
                 elapsed_time = time.time() - start_time
@@ -906,7 +911,8 @@ class LocalElasticAgent(SimpleElasticAgent):
         num_samples_to_show: int,
         log_processes: bool,
         is_final: bool = True,
-        success: bool = True
+        success: bool = True,
+        last_logged_sample_count: dict = None
     ) -> None:
         """
         Log GPU memory statistics.
@@ -919,6 +925,7 @@ class LocalElasticAgent(SimpleElasticAgent):
             log_processes: Whether to log process-level information
             is_final: Whether this is the final log (vs periodic)
             success: Whether memory reclaim was successful (only relevant if is_final=True)
+            last_logged_sample_count: Dictionary tracking how many samples have been logged per GPU for periodic logs
         """
         for device_idx in range(num_gpus):
             if not memory_stats[device_idx]:
@@ -927,10 +934,17 @@ class LocalElasticAgent(SimpleElasticAgent):
             all_samples = memory_stats[device_idx]
 
             # For final logs, include first sample + last N samples to show the full picture
-            # For periodic logs, just show last N samples
+            # For periodic logs, only show NEW samples since the last periodic log
             if is_final and len(all_samples) > num_samples_to_show:
                 # Include first sample and last N samples
                 samples_to_show = [all_samples[0]] + all_samples[-num_samples_to_show:]
+            elif not is_final and last_logged_sample_count is not None:
+                # For periodic logs, only show samples that haven't been logged yet
+                last_logged_count = last_logged_sample_count.get(device_idx, 0)
+                samples_to_show = all_samples[last_logged_count:]
+                # If no new samples, skip this GPU
+                if not samples_to_show:
+                    continue
             else:
                 # Show only the last N samples if we have more than N
                 samples_to_show = all_samples[-num_samples_to_show:]
@@ -956,7 +970,7 @@ class LocalElasticAgent(SimpleElasticAgent):
                     msg_prefix = "GPU %d memory reclaimed in %ds (%d samples): %s"
                 else:
                     log_func = logger.warning
-                    msg_prefix = "GPU %d memory usage history (%d samples): %s"
+                    msg_prefix = "GPU %d memory usage history at %ds (%d samples): %s"
 
                 log_func(
                     msg_prefix,
