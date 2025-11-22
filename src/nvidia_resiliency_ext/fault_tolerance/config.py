@@ -67,6 +67,12 @@ class FaultToleranceConfig:
       memory has been reclaimed. Default: 512.0.
     * `gpu_memory_poll_interval` [float] poll interval (in seconds) for checking GPU memory during
       reclaim process. Default: 2.0.
+    * `gpu_memory_log_processes` [bool] if True, log per-process GPU memory usage and separate
+      driver memory from process memory during reclaim process. Default: False.
+    * `gpu_memory_periodic_log_interval` [float] if > 0, log GPU memory stats periodically during
+      reclaim process at this interval (in seconds). If 0, only log at the end. Default: 0.0.
+    * `gpu_memory_num_samples_to_show` [int] number of memory samples to show in the final log.
+      Default: 10.
     * `check_remaining_processes` [bool] if True, check for and log any remaining worker processes
       after termination. Useful for debugging process cleanup issues. Default: False.
 
@@ -92,6 +98,9 @@ class FaultToleranceConfig:
     gpu_memory_reclaim_timeout: float = 50.0
     gpu_memory_tolerance_mb: float = 512.0  # Maximum allowed GPU memory usage (in MB)
     gpu_memory_poll_interval: float = 2.0  # Poll interval for GPU memory check (in seconds)
+    gpu_memory_log_processes: bool = False  # Log per-process GPU memory usage
+    gpu_memory_periodic_log_interval: float = 0.0  # Periodic logging interval (0 = only log at end)
+    gpu_memory_num_samples_to_show: int = 10  # Number of samples to show in final log
     check_remaining_processes: bool = False
 
     @staticmethod
@@ -225,6 +234,8 @@ class FaultToleranceConfig:
             'gpu_memory_reclaim_timeout',
             'gpu_memory_tolerance_mb',
             'gpu_memory_poll_interval',
+            'gpu_memory_periodic_log_interval',
+            'gpu_memory_num_samples_to_show',
         ]
         for field in fields(FaultToleranceConfig):
             cli_field_name = f"ft_{field.name}"

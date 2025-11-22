@@ -59,7 +59,7 @@ class GPUMemoryLogger(PynvmlMixin):
             context (str): Optional context string to include in the log message (only used if log_memory=True).
 
         Returns:
-            dict: Dictionary with keys 'total_mb', 'used_mb', 'free_mb' or None if pynvml not available
+            dict: Dictionary with keys 'total_mb', 'used_mb', 'free_mb', 'reserved_mb' or None if pynvml not available
         """
         if not self._pynvml_available:
             return None
@@ -88,25 +88,121 @@ class GPUMemoryLogger(PynvmlMixin):
             total_mb = memory_info.total / (1024 * 1024)
             used_mb = memory_info.used / (1024 * 1024)
             free_mb = memory_info.free / (1024 * 1024)
+            reserved_mb = memory_info.reserved / (1024 * 1024)
 
             # Log if requested
             if log_memory:
                 context_str = f" ({context})" if context else ""
                 self.log.info(
                     f"GPU {device_id} Memory{context_str} - Total: {total_mb:.2f} MB, "
-                    f"Used: {used_mb:.2f} MB, Free: {free_mb:.2f} MB"
+                    f"Used: {used_mb:.2f} MB, Free: {free_mb:.2f} MB, Reserved: {reserved_mb:.2f} MB"
                 )
 
             return {
                 'total_mb': total_mb,
                 'used_mb': used_mb,
                 'free_mb': free_mb,
+                'reserved_mb': reserved_mb,
             }
 
         except Exception as e:
             # Include device_index in error for clarity
             device_str = f" (device_index={device_index})" if device_index is not None else ""
             self.log.error(f"Failed to get GPU memory information{device_str}: {e}")
+            return None
+        finally:
+            try:
+                self.pynvml.nvmlShutdown()
+            except Exception as e:
+                self.log.warning(f"Error during NVML shutdown: {e}")
+
+    @with_pynvml_lock
+    def get_gpu_process_info(self, device_index: int = None):
+        """
+        Get per-process GPU memory usage for the specified device using pynvml.
+
+        Args:
+            device_index (int): Optional GPU device index. If None, uses LOCAL_RANK env variable.
+
+        Returns:
+            dict: Dictionary with keys 'device_id', 'total_used_mb', 'driver_reserved_mb', 'processes'
+                  where 'processes' is a list of dicts with 'pid', 'used_mb', 'process_name'
+                  Returns None if pynvml not available
+        """
+        if not self._pynvml_available:
+            return None
+
+        try:
+            # Determine device: use device_index if provided, otherwise use LOCAL_RANK
+            if device_index is not None:
+                device_id = device_index
+            else:
+                local_rank = os.getenv('LOCAL_RANK')
+                if local_rank is None:
+                    raise RuntimeError("Neither device_index provided nor LOCAL_RANK set")
+                device_id = int(local_rank)
+
+            self.pynvml.nvmlInit()
+
+            # Get handle for the determined device
+            handle = self.pynvml.nvmlDeviceGetHandleByIndex(device_id)
+
+            # Get memory information (v2 separates reserved memory from free memory)
+            memory_info = self.pynvml.nvmlDeviceGetMemoryInfo(
+                handle, version=self.pynvml.nvmlMemory_v2
+            )
+
+            # Get running compute processes on the GPU
+            try:
+                all_processes = self.pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
+            except Exception as e:
+                self.log.warning(f"Failed to get compute processes for GPU {device_id}: {e}")
+                all_processes = []
+
+            # Collect process information
+            processes = []
+            total_process_mem_mb = 0.0
+
+            for proc in all_processes:
+                proc_mem_mb = proc.usedGpuMemory / (1024 * 1024) if proc.usedGpuMemory else 0.0
+                total_process_mem_mb += proc_mem_mb
+
+                # Try to get process name
+                process_name = "unknown"
+                try:
+                    import psutil
+
+                    ps_proc = psutil.Process(proc.pid)
+                    process_name = ps_proc.name()
+                except Exception:
+                    pass
+
+                processes.append(
+                    {
+                        'pid': proc.pid,
+                        'used_mb': proc_mem_mb,
+                        'process_name': process_name,
+                    }
+                )
+
+            # Calculate driver/reserved memory (total used - process memory)
+            total_used_mb = memory_info.used / (1024 * 1024)
+            reserved_mb = memory_info.reserved / (1024 * 1024)
+            driver_mem_mb = total_used_mb - total_process_mem_mb
+
+            return {
+                'device_id': device_id,
+                'total_used_mb': total_used_mb,
+                'reserved_mb': reserved_mb,
+                'driver_mem_mb': driver_mem_mb,
+                'process_mem_mb': total_process_mem_mb,
+                'processes': processes,
+            }
+
+        except Exception as e:
+            # Include device_index in error for clarity
+            device_str = f" (device_index={device_index})" if device_index is not None else ""
+            self.log.error(f"Failed to get GPU process information{device_str}: {e}")
             return None
         finally:
             try:

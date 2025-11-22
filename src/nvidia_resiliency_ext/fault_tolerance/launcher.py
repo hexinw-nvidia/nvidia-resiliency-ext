@@ -807,15 +807,20 @@ class LocalElasticAgent(SimpleElasticAgent):
         timeout = self._ft_cfg.gpu_memory_reclaim_timeout
         tolerance_mb = self._ft_cfg.gpu_memory_tolerance_mb
         poll_interval = self._ft_cfg.gpu_memory_poll_interval
+        log_processes = self._ft_cfg.gpu_memory_log_processes
+        periodic_log_interval = self._ft_cfg.gpu_memory_periodic_log_interval
+        num_samples_to_show = self._ft_cfg.gpu_memory_num_samples_to_show
 
         start_time = time.time()
         all_devices_ok = False
 
         # Store memory stats per GPU per poll for logging
         memory_stats = {device_idx: [] for device_idx in range(num_gpus)}
+        last_periodic_log_time = start_time
 
         while time.time() - start_time < timeout:
             all_devices_ok = True
+            current_time = time.time()
 
             for device_idx in range(num_gpus):
                 mem_info = memory_logger.get_gpu_memory(device_index=device_idx)
@@ -824,34 +829,55 @@ class LocalElasticAgent(SimpleElasticAgent):
                     continue
 
                 current_mb = mem_info['used_mb']
+                reserved_mb = mem_info.get('reserved_mb', 0.0)
+
+                # Collect process info if enabled
+                proc_info = None
+                if log_processes:
+                    proc_info = memory_logger.get_gpu_process_info(device_index=device_idx)
+
                 # Save stats for logging
-                memory_stats[device_idx].append({
-                    'timestamp': time.time() - start_time,
+                stat_entry = {
+                    'timestamp': current_time - start_time,
                     'used_mb': current_mb,
-                })
+                    'reserved_mb': reserved_mb,
+                }
+
+                if proc_info:
+                    stat_entry['driver_mem_mb'] = proc_info['driver_mem_mb']
+                    stat_entry['process_mem_mb'] = proc_info['process_mem_mb']
+                    stat_entry['processes'] = proc_info['processes']
+
+                memory_stats[device_idx].append(stat_entry)
 
                 # Check if memory is below tolerance
                 if current_mb > tolerance_mb:
                     all_devices_ok = False
 
+            # Periodic logging if enabled
+            if periodic_log_interval > 0 and (current_time - last_periodic_log_time) >= periodic_log_interval:
+                self._log_gpu_memory_stats(
+                    memory_stats,
+                    num_gpus,
+                    current_time - start_time,
+                    num_samples_to_show,
+                    log_processes,
+                    is_final=False
+                )
+                last_periodic_log_time = current_time
+
             if all_devices_ok:
                 elapsed_time = time.time() - start_time
-                # Log memory stats per GPU - all info in one line per GPU
-                for device_idx in range(num_gpus):
-                    if memory_stats[device_idx]:
-                        # Show only the last 10 samples if we have more than 10
-                        samples_to_show = memory_stats[device_idx][-10:]
-                        samples_str = ", ".join([
-                            f"{int(s['used_mb'])}MB@{int(s['timestamp'])}s"
-                            for s in samples_to_show
-                        ])
-                        logger.info(
-                            "GPU %d memory reclaimed in %ds (%d samples): %s",
-                            device_idx,
-                            int(elapsed_time),
-                            len(memory_stats[device_idx]),
-                            samples_str,
-                        )
+                # Log final memory stats per GPU
+                self._log_gpu_memory_stats(
+                    memory_stats,
+                    num_gpus,
+                    elapsed_time,
+                    num_samples_to_show,
+                    log_processes,
+                    is_final=True,
+                    success=True
+                )
                 return
 
             time.sleep(poll_interval)
@@ -862,20 +888,111 @@ class LocalElasticAgent(SimpleElasticAgent):
             "Memory may not have been fully cleaned up. Proceeding anyway as best effort.",
             timeout,
         )
+        self._log_gpu_memory_stats(
+            memory_stats,
+            num_gpus,
+            timeout,
+            num_samples_to_show,
+            log_processes,
+            is_final=True,
+            success=False
+        )
+
+    def _log_gpu_memory_stats(
+        self,
+        memory_stats: dict,
+        num_gpus: int,
+        elapsed_time: float,
+        num_samples_to_show: int,
+        log_processes: bool,
+        is_final: bool = True,
+        success: bool = True
+    ) -> None:
+        """
+        Log GPU memory statistics.
+
+        Args:
+            memory_stats: Dictionary of memory stats per GPU
+            num_gpus: Number of GPUs
+            elapsed_time: Elapsed time since start
+            num_samples_to_show: Number of samples to show in the log
+            log_processes: Whether to log process-level information
+            is_final: Whether this is the final log (vs periodic)
+            success: Whether memory reclaim was successful (only relevant if is_final=True)
+        """
         for device_idx in range(num_gpus):
-            if memory_stats[device_idx]:
-                # Show only the last 10 samples if we have more than 10
-                samples_to_show = memory_stats[device_idx][-10:]
+            if not memory_stats[device_idx]:
+                continue
+
+            all_samples = memory_stats[device_idx]
+
+            # For final logs, include first sample + last N samples to show the full picture
+            # For periodic logs, just show last N samples
+            if is_final and len(all_samples) > num_samples_to_show:
+                # Include first sample and last N samples
+                samples_to_show = [all_samples[0]] + all_samples[-num_samples_to_show:]
+            else:
+                # Show only the last N samples if we have more than N
+                samples_to_show = all_samples[-num_samples_to_show:]
+
+            # Create basic sample string
+            if log_processes and 'driver_mem_mb' in samples_to_show[-1]:
+                # Enhanced format with driver/process separation
+                samples_str = ", ".join([
+                    f"{int(s['used_mb'])}MB({int(s.get('driver_mem_mb', 0))}D+{int(s.get('process_mem_mb', 0))}P)@{int(s['timestamp'])}s"
+                    for s in samples_to_show
+                ])
+            else:
+                # Simple format
                 samples_str = ", ".join([
                     f"{int(s['used_mb'])}MB@{int(s['timestamp'])}s"
                     for s in samples_to_show
                 ])
-                logger.warning(
-                    "GPU %d memory usage history (%d samples): %s",
+
+            # Determine log level and message prefix
+            if is_final:
+                if success:
+                    log_func = logger.info
+                    msg_prefix = "GPU %d memory reclaimed in %ds (%d samples): %s"
+                else:
+                    log_func = logger.warning
+                    msg_prefix = "GPU %d memory usage history (%d samples): %s"
+
+                log_func(
+                    msg_prefix,
                     device_idx,
-                    len(memory_stats[device_idx]),
+                    int(elapsed_time),
+                    len(all_samples),
                     samples_str,
                 )
+            else:
+                # Periodic log
+                logger.info(
+                    "GPU %d memory status at %ds (%d samples): %s",
+                    device_idx,
+                    int(elapsed_time),
+                    len(all_samples),
+                    samples_str,
+                )
+
+            # Log process details if enabled and this is the most recent sample
+            if log_processes and is_final and 'processes' in samples_to_show[-1]:
+                processes = samples_to_show[-1]['processes']
+                if processes:
+                    logger.info(
+                        "GPU %d has %d process(es) using GPU memory:",
+                        device_idx,
+                        len(processes),
+                    )
+                    for proc in processes:
+                        logger.info(
+                            "  PID %d (%s): %.2f MB",
+                            proc['pid'],
+                            proc['process_name'],
+                            proc['used_mb'],
+                        )
+                else:
+                    logger.info("GPU %d has no processes using GPU memory", device_idx)
 
 
     def _shutdown(self, death_sig: signal.Signals = signal.SIGTERM, timeout: int = 30) -> None:
@@ -2150,6 +2267,38 @@ def get_args_parser() -> ArgumentParser:
         help="Part of Fault Tolerance pkg config (gpu_memory_poll_interval). "
         "Poll interval (in seconds) for checking GPU memory during reclaim process. "
         "Default: 2.0. Use 'null'|'none'|'' for None.",
+    )
+
+    parser.add_argument(
+        "--ft-gpu-memory-log-processes",
+        "--ft-gpu_memory_log_processes",
+        type=lambda x: str(x).lower() in ["true", "1", "yes"],
+        default=None,
+        dest="ft_gpu_memory_log_processes",
+        help="Part of Fault Tolerance pkg config (gpu_memory_log_processes). "
+        "If enabled, log per-process GPU memory usage and separate driver memory from "
+        "process memory during reclaim process. Default: False.",
+    )
+
+    parser.add_argument(
+        "--ft-gpu-memory-periodic-log-interval",
+        "--ft-gpu_memory_periodic_log_interval",
+        type=str,
+        default=None,
+        dest="ft_gpu_memory_periodic_log_interval",
+        help="Part of Fault Tolerance pkg config (gpu_memory_periodic_log_interval). "
+        "If > 0, log GPU memory stats periodically during reclaim process at this interval "
+        "(in seconds). If 0, only log at the end. Default: 0.0. Use 'null'|'none'|'' for None.",
+    )
+
+    parser.add_argument(
+        "--ft-gpu-memory-num-samples-to-show",
+        "--ft-gpu_memory_num_samples_to_show",
+        type=str,
+        default=None,
+        dest="ft_gpu_memory_num_samples_to_show",
+        help="Part of Fault Tolerance pkg config (gpu_memory_num_samples_to_show). "
+        "Number of memory samples to show in the final log. Default: 10.",
     )
 
     parser.add_argument(
