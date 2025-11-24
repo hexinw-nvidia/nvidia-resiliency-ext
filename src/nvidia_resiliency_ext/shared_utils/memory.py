@@ -167,13 +167,30 @@ class GPUMemoryLogger(PynvmlMixin):
                 proc_mem_mb = proc.usedGpuMemory / (1024 * 1024) if proc.usedGpuMemory else 0.0
                 total_process_mem_mb += proc_mem_mb
 
-                # Try to get process name
+                # Try to get detailed process information
                 process_name = "unknown"
+                ppid = None
+                pgid = None
+                cmdline = None
                 try:
                     import psutil
 
                     ps_proc = psutil.Process(proc.pid)
                     process_name = ps_proc.name()
+                    ppid = ps_proc.ppid()
+                    
+                    # Get process group ID
+                    try:
+                        # os.getpgid may fail if process doesn't exist anymore
+                        pgid = os.getpgid(proc.pid)
+                    except (OSError, ProcessLookupError):
+                        pgid = None
+                    
+                    # Get command line (list of arguments)
+                    try:
+                        cmdline = ps_proc.cmdline()
+                    except (psutil.AccessDenied, psutil.NoSuchProcess):
+                        cmdline = None
                 except Exception:
                     pass
 
@@ -182,6 +199,9 @@ class GPUMemoryLogger(PynvmlMixin):
                         'pid': proc.pid,
                         'used_mb': proc_mem_mb,
                         'process_name': process_name,
+                        'ppid': ppid,
+                        'pgid': pgid,
+                        'cmdline': cmdline,
                     }
                 )
 

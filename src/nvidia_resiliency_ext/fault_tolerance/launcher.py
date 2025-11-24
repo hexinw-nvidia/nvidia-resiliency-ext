@@ -989,8 +989,8 @@ class LocalElasticAgent(SimpleElasticAgent):
                     samples_str,
                 )
 
-            # Log process details if enabled and this is the most recent sample
-            if log_processes and is_final and 'processes' in samples_to_show[-1]:
+            # Log process details if enabled and processes are present in the most recent sample
+            if log_processes and 'processes' in samples_to_show[-1]:
                 processes = samples_to_show[-1]['processes']
                 if processes:
                     logger.info(
@@ -999,13 +999,29 @@ class LocalElasticAgent(SimpleElasticAgent):
                         len(processes),
                     )
                     for proc in processes:
+                        # Basic info
                         logger.info(
                             "  PID %d (%s): %.2f MB",
                             proc['pid'],
                             proc['process_name'],
                             proc['used_mb'],
                         )
-                else:
+                        # Additional process details
+                        details = []
+                        if proc.get('ppid') is not None:
+                            details.append(f"PPID={proc['ppid']}")
+                        if proc.get('pgid') is not None:
+                            details.append(f"PGID={proc['pgid']}")
+                        if details:
+                            logger.info("    %s", ", ".join(details))
+                        if proc.get('cmdline'):
+                            # Truncate very long command lines
+                            cmdline_str = " ".join(proc['cmdline'])
+                            if len(cmdline_str) > 200:
+                                cmdline_str = cmdline_str[:197] + "..."
+                            logger.info("    CMD: %s", cmdline_str)
+                elif is_final:
+                    # Only log "no processes" message for final logs to avoid spam
                     logger.info("GPU %d has no processes using GPU memory", device_idx)
 
 
