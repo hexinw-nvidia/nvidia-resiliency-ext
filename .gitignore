@@ -7,6 +7,8 @@ __pycache__
 cupti_module.*.so
 ft_state.json
 .pytest_cache
+
+# gRPC / protobuf generated Python (regenerate: pip install . or poetry build; requires grpcio-tools in build env)
 *_pb2.py
 *_pb2.pyi
 *_pb2_grpc.py

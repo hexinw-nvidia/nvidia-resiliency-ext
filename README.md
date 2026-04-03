@@ -34,14 +34,33 @@ For detailed documentation and usage information about each component, please re
 
 ## Installation
 
-### From sources
+NVRx is published as two PyPI distributions:
+
+- **`nvidia-resiliency-ext`** (default) — Full stack: MCP, LogSage, LangChain NVIDIA endpoints, gRPC, and the `nvrx-mcp-analysis` console script, plus the same `nvidia_resiliency_ext` library as minimal.
+- **`nvidia-resiliency-ext-minimal`** — Same import path (`import nvidia_resiliency_ext`) with a small dependency set (PyTorch, psutil, PyYAML, NVML, **protobuf**, etc.); **no** grpcio, MCP, LogSage, or LangChain. gRPC-only features still need the full package (or install **grpcio** yourself).
+
+gRPC-based per-cycle log funneling and attribution features that need LogSage/MCP require the full package (or install those components yourself on top of minimal). The **full** package’s build uses current `grpcio-tools` and expects **`protobuf` ≥ 6.31.1** at runtime. **Minimal** uses pre-2024 `grpcio-tools` and a **4.x/5.x** `protobuf` range (see `minimal/README.md`).
+
+### From PyPI
+
+- Full stack: `pip install nvidia-resiliency-ext`
+- Minimal only: `pip install nvidia-resiliency-ext-minimal`
+
+Pre-built wheels avoid compiling protobuf extensions at install time where possible; building from an sdist still uses the build backend in `pyproject.toml`.
+
+### From sources (this repository)
+
+From the **repository root** (default — full package, same as PyPI `nvidia-resiliency-ext`):
+
 - `git clone https://github.com/NVIDIA/nvidia-resiliency-ext`
 - `cd nvidia-resiliency-ext`
-- `pip install .`
+- `pip install .` or `poetry install` / `poetry build` (these run `build.py`, which generates `*_pb2*.py` / `*_pb2_grpc.py` / `*_pb2.pyi` next to the `.proto` files; those outputs are **gitignored** — do not commit them. Run `python clean.py` to remove generated protos and `build/` / `dist/`.)
 
+Minimal wheel (no grpcio in metadata; see `minimal/README.md`):
 
-### From PyPI wheel
-- `pip install nvidia-resiliency-ext`
+- `./scripts/build_minimal_wheel.sh` (writes `minimal/dist/`)
+
+To build **both** wheels: `scripts/build_both_wheels.sh`.
 
 ### Platform Support
 

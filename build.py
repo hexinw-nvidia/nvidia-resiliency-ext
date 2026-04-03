@@ -20,8 +20,6 @@ import shutil
 import subprocess
 import sys
 
-from pybind11.setup_helpers import Pybind11Extension, build_ext
-
 
 def find_file_in_dir(cuda_path, sfile):
     """
@@ -165,6 +163,10 @@ def _compile_protos(proto_dir, proto_filenames):
 
 
 def build(setup_kwargs):
+    # build.py lives at repo root; Poetry may invoke it from a subproject (e.g. minimal/).
+    repo_root = os.path.dirname(os.path.abspath(__file__))
+    os.chdir(repo_root)
+
     # Generate gRPC Python files from .proto files
     proto_dir = os.path.join("src", "nvidia_resiliency_ext", "shared_utils", "proto")
     proto_files = [
@@ -174,7 +176,6 @@ def build(setup_kwargs):
     ]
 
     try:
-        # Compile all proto files in one go (more efficient than one-by-one)
         compiled = _compile_protos(proto_dir, proto_files)
 
         if not compiled:
@@ -195,6 +196,8 @@ def build(setup_kwargs):
             "WARNING! CUPTI extension wont be build due to STRAGGLER_DET_SKIP_CUPTI_EXT_BUILD flag."
         )
         return
+
+    from pybind11.setup_helpers import Pybind11Extension, build_ext
 
     include_dirs = None
     library_dirs = None

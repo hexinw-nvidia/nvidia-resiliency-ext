@@ -27,9 +27,13 @@ jobs:
         run: |
           set -e
           cd "$GITHUB_WORKSPACE"
-          /opt/venv3.10/bin/poetry env use /opt/venv3.10/bin/python && /opt/venv3.10/bin/poetry build -f wheel
-          /opt/venv3.11/bin/poetry env use /opt/venv3.11/bin/python && /opt/venv3.11/bin/poetry build -f wheel
-          /opt/venv3.12/bin/poetry env use /opt/venv3.12/bin/python && /opt/venv3.12/bin/poetry build -f wheel
+          for VENV in /opt/venv3.10 /opt/venv3.11 /opt/venv3.12; do
+            "$VENV/bin/poetry" env use "$VENV/bin/python"
+            "$VENV/bin/poetry" build -f wheel
+            PATH="$VENV/bin:$PATH" STRAGGLER_DET_SKIP_CUPTI_EXT_BUILD=1 \
+              bash "$GITHUB_WORKSPACE/scripts/build_minimal_wheel.sh"
+          done
+          cp minimal/dist/*.whl dist/ 2>/dev/null || true
       - name: Upload the wheel artifact
         uses: actions/upload-artifact@v4
         with:
@@ -62,6 +66,7 @@ jobs:
         run: |
           pip install pytest
           PY_VER_NODOT=$(python -c"import sysconfig; print(sysconfig.get_config_var('py_version_nodot'))")
+          # Full wheel is nvidia_resiliency_ext-<ver>-cp... (minimal uses nvidia_resiliency_ext_minimal-...)
           pip install ./dist/nvidia_resiliency_ext-*-cp${PY_VER_NODOT}-*.whl
       - name: Run unit tests
         shell: bash

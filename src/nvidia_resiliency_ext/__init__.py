@@ -19,4 +19,7 @@ from importlib.metadata import PackageNotFoundError, version
 try:
     __version__ = version("nvidia-resiliency-ext")
 except PackageNotFoundError:
-    __version__ = "unknown"
+    try:
+        __version__ = version("nvidia-resiliency-ext-minimal")
+    except PackageNotFoundError:
+        __version__ = "unknown"

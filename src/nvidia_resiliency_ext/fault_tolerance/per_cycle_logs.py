@@ -46,16 +46,40 @@ import subprocess
 import tempfile
 import threading
 import time
+import importlib
 from dataclasses import dataclass
 from typing import Any, Optional, Union
 
-# gRPC imports for log aggregation
-import grpc
 from torch.distributed.elastic.multiprocessing import LogsDest, LogsSpecs, Std
 from torch.distributed.elastic.multiprocessing.subprocess_handler import SubprocessHandler
 
 from nvidia_resiliency_ext.shared_utils.log_manager import LogConfig
-from nvidia_resiliency_ext.shared_utils.proto import log_aggregation_pb2, log_aggregation_pb2_grpc
+
+# gRPC / protobuf for log aggregation (optional; requires full install or grpcio)
+_grpc_mod: Any = None
+_log_agg_pb2: Any = None
+_log_agg_pb2_grpc: Any = None
+
+
+def _ensure_grpc_for_per_cycle_logs() -> None:
+    """Load grpc and log_aggregation stubs on first use (minimal wheel has no grpcio)."""
+    global _grpc_mod, _log_agg_pb2, _log_agg_pb2_grpc
+    if _grpc_mod is not None:
+        return
+    try:
+        _grpc_mod = importlib.import_module("grpc")
+        from nvidia_resiliency_ext.shared_utils.proto import log_aggregation_pb2 as _lapb2
+        from nvidia_resiliency_ext.shared_utils.proto import log_aggregation_pb2_grpc as _lapb2grpc
+
+        _log_agg_pb2 = _lapb2
+        _log_agg_pb2_grpc = _lapb2grpc
+    except ImportError as e:
+        from nvidia_resiliency_ext._optional_imports import raise_full_install_import_error
+
+        raise_full_install_import_error(
+            "gRPC-based per-cycle log aggregation (requires grpcio, protobuf, etc.)", e
+        )
+
 
 # Special marker string to signal pipe-based logging
 # We can't use subprocess.PIPE directly because PyTorch expects strings
@@ -307,6 +331,7 @@ class GrpcWriterThread(threading.Thread):
             node_id: Unique node identifier (int for rank, or string for hostname/UUID)
             logger: Logger instance
         """
+        _ensure_grpc_for_per_cycle_logs()
         super().__init__(daemon=True, name="GrpcLogWriter")
 
         self.write_queue = write_queue
@@ -321,7 +346,7 @@ class GrpcWriterThread(threading.Thread):
         self.total_chunks_sent = 0
         self.connection_errors = 0
 
-    def _wait_for_server_ready(self) -> Optional['grpc.Channel']:
+    def _wait_for_server_ready(self) -> Optional[Any]:
         """
         Wait for gRPC server to be ready using health checks.
 
@@ -340,7 +365,7 @@ class GrpcWriterThread(threading.Thread):
             try:
                 # Create channel with streaming-ready settings (will be reused)
                 # This avoids double TCP handshake (health check + streaming)
-                channel = grpc.insecure_channel(
+                channel = _grpc_mod.insecure_channel(
                     self.grpc_server_address,
                     options=[
                         ('grpc.max_send_message_length', 10 * 1024 * 1024),  # 10MB
@@ -350,10 +375,10 @@ class GrpcWriterThread(threading.Thread):
                         ('grpc.keepalive_timeout_ms', 20000),  # Wait 20s for ping response
                     ],
                 )
-                stub = log_aggregation_pb2_grpc.LogAggregationServiceStub(channel)
+                stub = _log_agg_pb2_grpc.LogAggregationServiceStub(channel)
 
                 # Lightweight health check (not a full streaming connection)
-                response = stub.HealthCheck(log_aggregation_pb2.HealthRequest(), timeout=1.0)
+                response = stub.HealthCheck(_log_agg_pb2.HealthRequest(), timeout=1.0)
 
                 if response.healthy:
                     self.logger.info(
@@ -362,7 +387,7 @@ class GrpcWriterThread(threading.Thread):
                     # Return channel for reuse (avoids second TCP handshake!)
                     return channel
 
-            except grpc.RpcError:
+            except _grpc_mod.RpcError:
                 # Server not ready yet - expected, will retry
                 attempt += 1
 
@@ -430,7 +455,7 @@ class GrpcWriterThread(threading.Thread):
             try:
                 # Try to stream logs using the channel
                 self._stream_logs(channel)
-            except grpc.RpcError as e:
+            except _grpc_mod.RpcError as e:
                 self.connection_errors += 1
 
                 # If shutdown was requested and streaming failed, logs may be lost
@@ -463,7 +488,7 @@ class GrpcWriterThread(threading.Thread):
 
         self.logger.debug(f"gRPC writer thread exiting (node_id={self.node_id})")
 
-    def _stream_logs(self, channel: 'grpc.Channel'):
+    def _stream_logs(self, channel: Any):
         """
         Stream logs to server using provided gRPC channel.
 
@@ -473,7 +498,7 @@ class GrpcWriterThread(threading.Thread):
         Args:
             channel: Existing gRPC channel (caller manages lifecycle)
         """
-        stub = log_aggregation_pb2_grpc.LogAggregationServiceStub(channel)
+        stub = _log_agg_pb2_grpc.LogAggregationServiceStub(channel)
 
         def log_generator():
             """Yield LogChunk messages from queue; drain remaining items when shutdown is requested."""
@@ -488,7 +513,7 @@ class GrpcWriterThread(threading.Thread):
                     data_bytes = data.encode('utf-8')
 
                     # Create LogChunk message
-                    chunk = log_aggregation_pb2.LogChunk(
+                    chunk = _log_agg_pb2.LogChunk(
                         node_id=self.node_id, data=data_bytes, file_path=log_file_path
                     )
 
@@ -532,7 +557,7 @@ class GrpcWriterThread(threading.Thread):
                 f"Stream completed: {response.status}, "
                 f"server received {response.bytes_received} bytes"
             )
-        except grpc.RpcError as e:
+        except _grpc_mod.RpcError as e:
             # Connection lost or server error - will be caught by caller for retry
             raise
 

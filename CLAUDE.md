@@ -18,9 +18,12 @@ poetry build -f wheel
 # Build generates gRPC protobuf stubs and optionally a CUPTI C++ extension
 # Skip CUPTI build if CUDA/CUPTI not available:
 STRAGGLER_DET_SKIP_CUPTI_EXT_BUILD=1 pip install .
+
+# Minimal PyPI wheel (no runtime grpcio; build runs protoc and skips CUPTI):
+./scripts/build_minimal_wheel.sh
 ```
 
-The build process (`build.py`) compiles three proto files (`nvhcd.proto`, `log_aggregation.proto`, `nvrx_interface.proto`) and optionally builds a pybind11 CUPTI extension for straggler detection. Generated `*_pb2.py` / `*_pb2_grpc.py` files are gitignored and regenerated at build time.
+The build process (`build.py`) always compiles three proto files (`nvhcd.proto`, `log_aggregation.proto`, `nvrx_interface.proto`) via `grpcio-tools` and optionally builds a pybind11 CUPTI extension. Generated `*_pb2*.py` / `*_pb2_grpc.py` / `*_pb2.pyi` are **gitignored** and must not be committed; `pip install .`, `poetry build`, and `./scripts/build_minimal_wheel.sh` regenerate them.
 
 ## Code Quality
 
@@ -120,7 +123,7 @@ Generated stubs are gitignored. If you modify `.proto` files, rebuild with `pip 
 ## Testing Notes
 
 - CPU-only tests run without GPU. GPU/multi-node functional tests require real hardware.
-- Install the wheel before running tests in CI: `pip install ./dist/nvidia_resiliency_ext-*-cp${PY_VER}-*.whl`
+- CI builds the full wheel from the repo root, runs `scripts/build_minimal_wheel.sh`, then copies minimal wheels into `dist/` (see `.github/workflows/unit_test.yml`); tests install the full `nvidia_resiliency_ext-*-cp*.whl` (not `*_minimal-*`).
 - Some straggler tests require CUPTI; use `-k` filtering to select CPU-only tests.
 - `MKL_SERVICE_FORCE_INTEL=1` may be needed to work around MKL threading issues in test environments.
 

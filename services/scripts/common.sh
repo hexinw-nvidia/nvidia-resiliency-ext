@@ -73,7 +73,11 @@ install_nvrx_packages() {
             echo "  Uninstalling existing nvidia-resiliency-ext..."
             pip uninstall nvidia-resiliency-ext -y --quiet 2>/dev/null || true
         fi
-        echo "  Installing nvidia-resiliency-ext (editable from repo)..."
+        if pip show nvidia-resiliency-ext-minimal &>/dev/null; then
+            echo "  Uninstalling existing nvidia-resiliency-ext-minimal..."
+            pip uninstall nvidia-resiliency-ext-minimal -y --quiet 2>/dev/null || true
+        fi
+        echo "  Installing nvidia-resiliency-ext (editable from repo root)..."
         STRAGGLER_DET_SKIP_CUPTI_EXT_BUILD=1 pip install --no-cache-dir --no-deps -e "${repo_dir}" --quiet
     fi
     
@@ -93,7 +97,7 @@ install_nvrx_packages() {
         pip install --no-cache-dir -e "${repo_dir}/services" --quiet
     fi
 
-    # Always re-apply editable install of the library so it wins over any reinstall from nvrx-attrsvc deps (nvidia-resiliency-ext>=0.5.0).
+    # Always re-apply editable install of the library so it wins over any reinstall from nvrx-attrsvc deps (nvidia-resiliency-ext).
     echo "  Ensuring nvidia-resiliency-ext is editable from repo..."
     STRAGGLER_DET_SKIP_CUPTI_EXT_BUILD=1 pip install --no-cache-dir --no-deps -e "${repo_dir}" --force-reinstall --quiet
 

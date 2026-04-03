@@ -25,7 +25,6 @@ from nvidia_resiliency_ext.attribution.log_analyzer.analysis_pipeline import (
 from nvidia_resiliency_ext.attribution.log_analyzer.config import ErrorCode, LogSageExecutionConfig
 from nvidia_resiliency_ext.attribution.log_analyzer.job import Job
 from nvidia_resiliency_ext.attribution.log_analyzer.log_path_metadata import CYCLE_LOG_PATTERN
-from nvidia_resiliency_ext.attribution.log_analyzer.nvrx_logsage import NVRxLogAnalyzer
 from nvidia_resiliency_ext.attribution.log_analyzer.splitlog import SplitlogTracker
 from nvidia_resiliency_ext.attribution.log_analyzer.tracked_jobs import TrackedJobs
 from nvidia_resiliency_ext.attribution.log_analyzer.types import (
@@ -37,7 +36,6 @@ from nvidia_resiliency_ext.attribution.log_analyzer.utils import (
     nvrx_run_result_to_log_dict,
     validate_log_path,
 )
-from nvidia_resiliency_ext.attribution.mcp_integration import create_mcp_client
 from nvidia_resiliency_ext.attribution.path_utils import path_is_under_allowed_root
 from nvidia_resiliency_ext.attribution.postprocessing import post_analysis_items
 from nvidia_resiliency_ext.attribution.trace_analyzer.fr_support import (
@@ -62,9 +60,15 @@ class LogSageRunner:
         self._mcp_client: Any = None
         if not config.use_lib_log_analysis:
             try:
+                from nvidia_resiliency_ext.attribution.mcp_integration import create_mcp_client
+
                 self._mcp_client = create_mcp_client(
                     mcp_server_log_level=config.mcp_server_log_level,
                 )
+            except ImportError as e:
+                from nvidia_resiliency_ext._optional_imports import raise_full_install_import_error
+
+                raise_full_install_import_error("MCP log analysis backend", e)
             except Exception as e:
                 raise RuntimeError(f"failed to create MCP client: {e}") from e
 
@@ -148,7 +152,15 @@ class LogSageRunner:
             if self._lib_log_analyzer_init_error is not None:
                 raise self._lib_log_analyzer_init_error
             try:
+                from nvidia_resiliency_ext.attribution.log_analyzer.nvrx_logsage import (
+                    NVRxLogAnalyzer,
+                )
+
                 self._lib_log_analyzer = NVRxLogAnalyzer(dict(run_kwargs))
+            except ImportError as e:
+                from nvidia_resiliency_ext._optional_imports import raise_full_install_import_error
+
+                raise_full_install_import_error("in-process LogSage (LogSage / LangChain stack)", e)
             except Exception as e:
                 self._lib_log_analyzer_init_error = e
                 logger.error("NVRxLogAnalyzer init failed; caching error (no retry): %s", e)
