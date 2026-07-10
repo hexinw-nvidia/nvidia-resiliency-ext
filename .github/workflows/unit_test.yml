@@ -22,18 +22,17 @@ jobs:
           fetch-depth: 0
       - name: Fix Git dubious ownership
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-      # Use builder image venvs (Dockerfile.builder: /opt/venv3.10, 3.11, 3.12 with poetry + dynamic-versioning)
-      - name: Build wheels
+      # CI only builds/tests the prebuilt Python 3.12 wheel. Python 3.10/3.11 users
+      # can still build wheels directly from source.
+      - name: Build Python 3.12 wheel
         run: |
           set -e
           cd "$GITHUB_WORKSPACE"
-          /opt/venv3.10/bin/poetry env use /opt/venv3.10/bin/python && /opt/venv3.10/bin/poetry build -f wheel
-          /opt/venv3.11/bin/poetry env use /opt/venv3.11/bin/python && /opt/venv3.11/bin/poetry build -f wheel
           /opt/venv3.12/bin/poetry env use /opt/venv3.12/bin/python && /opt/venv3.12/bin/poetry build -f wheel
       - name: Upload the wheel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: resiliency-wheels
+          name: resiliency-wheel-py312
           path: dist/*.whl
 
   unit_tests_cpu_subset:
@@ -43,8 +42,6 @@ jobs:
       matrix:
         container:
           - 'ghcr.io/nvidia/nvidia-resiliency-ext/pytorch:2.5.1-cuda12.4-cudnn9-runtime'
-          - 'ghcr.io/nvidia/nvidia-resiliency-ext/pytorch:2.4.1-cuda12.1-cudnn9-runtime'
-          - 'ghcr.io/nvidia/nvidia-resiliency-ext/pytorch:2.3.1-cuda12.1-cudnn8-runtime'
         test_type: ['fault_tolerance']
     container:
       image: ${{ matrix.container }}
@@ -56,12 +53,17 @@ jobs:
       - name: Download wheels
         uses: actions/download-artifact@v4
         with:
-          name: resiliency-wheels
+          name: resiliency-wheel-py312
           path: ./dist/
       - name: Set up environment
         run: |
           pip install pytest
           PY_VER_NODOT=$(python -c"import sysconfig; print(sysconfig.get_config_var('py_version_nodot'))")
+          if [[ "${PY_VER_NODOT}" != "312" ]]; then
+              echo "::error::Prebuilt wheel CI only builds cp312; container provides cp${PY_VER_NODOT}."
+              echo "::error::Python 3.10/3.11 wheels are deprecated in CI; build them from source if needed."
+              exit 1
+          fi
           pip install ./dist/nvidia_resiliency_ext-*-cp${PY_VER_NODOT}-*.whl
       - name: Run unit tests
         shell: bash
