@@ -87,6 +87,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="seconds before a still-present finding pages again (default 3600)",
     )
     parser.add_argument(
+        "--notify-cycle-restarts",
+        action="store_true",
+        default=None,
+        help="notify once for every newly observed NVRx restart cycle (initial cycle excluded)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         default=None,

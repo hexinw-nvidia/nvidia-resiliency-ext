@@ -218,6 +218,61 @@ def generation_churn(snapshot: Snapshot, config: Config) -> list[Finding]:
 # ---------------------------------------------------------------------------------
 # Restart anomalies -- platform independent
 # ---------------------------------------------------------------------------------
+def cycle_restart(snapshot: Snapshot, config: Config) -> list[Finding]:
+    """Report each NVRx cycle that starts after the watcher's initial observation.
+
+    Cycle-info files are durable, so the previous latest-cycle key is a cursor.  Walking
+    forward from it reports every restart even when multiple cycles begin between watcher
+    passes.  The first pass establishes the cursor without replaying historical cycles.
+    """
+    if not config.notify_cycle_restarts or snapshot.prior.latest_cycle_key is None:
+        return []
+
+    records = sorted(
+        (cycle for cycle in snapshot.cycles if cycle.start_time is not None),
+        key=lambda cycle: (
+            cycle.start_time,
+            cycle.job_id,
+            cycle.attempt_index,
+            cycle.cycle_number,
+        ),
+    )
+    prior_index = next(
+        (
+            index
+            for index, cycle in enumerate(records)
+            if cycle.key == snapshot.prior.latest_cycle_key
+        ),
+        None,
+    )
+    if prior_index is not None:
+        new_cycles = records[prior_index + 1 :]
+    elif snapshot.prior.last_pass is not None:
+        # The prior cycle file may have been removed. Avoid replaying the retained history;
+        # only report records whose start time proves they appeared after the last pass.
+        new_cycles = [cycle for cycle in records if cycle.start_time > snapshot.prior.last_pass]
+    else:
+        return []
+
+    return [
+        Finding(
+            key=f"nvrx-cycle-restart-{cycle.key}",
+            detector="cycle_restart",
+            severity=INFO,
+            summary=(
+                f"NVRx restart cycle {cycle.cycle_number} started for generation "
+                f"{cycle.job_id}."
+            ),
+            detail=(
+                f"Started at {cycle.start_time.isoformat()}; "
+                f"active nodes: {cycle.active_nodes or 'unknown'}; "
+                f"standby nodes: {cycle.standby_nodes or 'none'}."
+            ),
+        )
+        for cycle in new_cycles
+    ]
+
+
 def restart_storm(snapshot: Snapshot, config: Config) -> list[Finding]:
     """Too many NVRx restart cycles in a short window."""
     cutoff = snapshot.observed_at - timedelta(seconds=config.storm_window)
@@ -467,6 +522,7 @@ ALL: tuple[Detector, ...] = (
     Detector("chain_exhausted", (CAP_PLATFORM,), chain_exhausted),
     Detector("chain_not_cancelled", (CAP_PLATFORM,), chain_not_cancelled),
     Detector("generation_churn", (CAP_PLATFORM,), generation_churn),
+    Detector("cycle_restart", (CAP_CYCLES,), cycle_restart),
     Detector("restart_storm", (CAP_CYCLES,), restart_storm),
     Detector("stalled_progress", (CAP_CYCLES, CAP_CHECKPOINT), stalled_progress),
     Detector("cycle_stalled", (CAP_CYCLES,), cycle_stalled),

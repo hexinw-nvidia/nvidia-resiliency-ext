@@ -409,6 +409,64 @@ class TestGenerationChurn:
 # ---------------------------------------------------------------------------------
 # Restart anomalies
 # ---------------------------------------------------------------------------------
+class TestCycleRestart:
+    def test_disabled_by_default(self, config):
+        prior = cycle(0, start_min_ago=20)
+        current = cycle(1, start_min_ago=5)
+        snap = make_snapshot(
+            cycles=(prior, current),
+            prior=types.PriorState(latest_cycle_key=prior.key, last_pass=ago(minutes=10)),
+        )
+        assert detectors.cycle_restart(snap, config) == []
+
+    def test_initial_observation_establishes_baseline(self, config):
+        config.notify_cycle_restarts = True
+        snap = make_snapshot(cycles=(cycle(3, start_min_ago=5),))
+        assert detectors.cycle_restart(snap, config) == []
+
+    def test_reports_each_cycle_after_previous_cursor(self, config):
+        config.notify_cycle_restarts = True
+        prior = cycle(0, start_min_ago=20)
+        cycle_one = cycle(1, start_min_ago=10)
+        cycle_two = cycle(2, start_min_ago=5)
+        snap = make_snapshot(
+            cycles=(cycle_two, prior, cycle_one),
+            prior=types.PriorState(latest_cycle_key=prior.key, last_pass=ago(minutes=15)),
+        )
+        findings = detectors.cycle_restart(snap, config)
+        assert [finding.key for finding in findings] == [
+            f"nvrx-cycle-restart-{cycle_one.key}",
+            f"nvrx-cycle-restart-{cycle_two.key}",
+        ]
+        assert all(finding.severity == types.INFO for finding in findings)
+
+    def test_successor_generation_cycle_zero_is_reported(self, config):
+        config.notify_cycle_restarts = True
+        prior = cycle(4, job_id="job1", start_min_ago=20)
+        successor = cycle(0, job_id="job2", start_min_ago=5)
+        snap = make_snapshot(
+            cycles=(prior, successor),
+            prior=types.PriorState(latest_cycle_key=prior.key, last_pass=ago(minutes=10)),
+        )
+        findings = detectors.cycle_restart(snap, config)
+        assert len(findings) == 1
+        assert "generation job2" in findings[0].summary
+
+    def test_missing_cursor_uses_last_pass_without_replaying_history(self, config):
+        config.notify_cycle_restarts = True
+        old = cycle(1, start_min_ago=20)
+        new = cycle(2, start_min_ago=5)
+        snap = make_snapshot(
+            cycles=(old, new),
+            prior=types.PriorState(
+                latest_cycle_key="removed.0.0",
+                last_pass=ago(minutes=10),
+            ),
+        )
+        findings = detectors.cycle_restart(snap, config)
+        assert [finding.key for finding in findings] == [f"nvrx-cycle-restart-{new.key}"]
+
+
 class TestRestartStorm:
     def test_fires_on_rate(self, config):
         records = tuple(cycle(i, start_min_ago=25 - i, duration_min=1) for i in range(6))
@@ -1177,10 +1235,12 @@ class TestConfig:
                 "NVRX_WATCH_JOB_NAME": "burn",
                 "NVRX_WATCH_GRACE": "300",
                 "NVRX_WATCH_DRY_RUN": "1",
+                "NVRX_WATCH_NOTIFY_CYCLE_RESTARTS": "true",
                 "NVRX_WATCH_DISABLE": "suspect_node,cycle_stalled",
             }
         )
         assert loaded.job_name == "burn" and loaded.grace == 300.0 and loaded.dry_run
+        assert loaded.notify_cycle_restarts
         assert loaded.disable == ("suspect_node", "cycle_stalled")
 
     def test_work_dir_layout_matches_the_sbatch(self):

@@ -69,6 +69,10 @@ file live under it. Other defaults: `--platform` is `slurm`, `--state-dir` is
 (they enable the restart-budget detector and paging). Every flag also reads from
 `NVRX_WATCH_<FLAG>`.
 
+`--notify-cycle-restarts` emits one informational notification whenever a new NVRx
+restart cycle is observed. The initial cycle present when the watcher starts establishes
+the baseline and is not reported; the option is off by default to avoid noisy alerts.
+
 Exit codes: `0` clean, `1` degraded (a source could not be observed — no heartbeat was
 sent), `2` at least one critical finding.
 
@@ -122,6 +126,7 @@ out — the failure that otherwise costs a night with nothing in any log.
 | `chain_exhausted` | Nothing running or queued while a chain is expected |
 | `chain_not_cancelled` | A generation exited 93 but successors are still queued |
 | `generation_churn` | Too many generations ending per window |
+| `cycle_restart` | A new NVRx restart cycle starts after the watcher baseline |
 | `restart_storm` | Too many NVRx cycles per window |
 | `stalled_progress` | Cycles complete but the checkpoint iteration does not move |
 | `cycle_stalled` | Current cycle open with no checkpoint or cycle activity |

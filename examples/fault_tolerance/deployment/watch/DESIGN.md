@@ -193,6 +193,7 @@ and the successor generation restarts a job NVRx said must not restart. Cheap to
 
 | Detector | Fires when | Sev |
 |---|---|---|
+| `cycle_restart` | A new cycle starts after the initial watcher baseline (opt-in) | info |
 | `restart_storm` | ≥ `storm_cycles` (5) cycles started within `storm_window` (30m) | warning |
 | `stalled_progress` | ≥ `stall_cycles` (3) cycles completed with no change in checkpoint iteration | critical |
 | `cycle_stalled` | Current cycle open, and neither cycle info nor checkpoint has changed for `stall_seconds` (1h) | critical |

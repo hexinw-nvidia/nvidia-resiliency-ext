@@ -48,6 +48,8 @@ class Config:
     expect_file: str = ""  # default ~/.nvrx_watch_expect_chain
     command_timeout: float = 30.0
     alert_cooldown: float = 3600.0
+    # Opt in because a healthy-but-restarting run can generate frequent notifications.
+    notify_cycle_restarts: bool = False
 
     # --- chain reconciliation ------------------------------------------------------
     grace: float = 120.0  # after task 0 ends, before treating a generation as orphaned
