@@ -25,7 +25,7 @@ import urllib.error
 import urllib.request
 from typing import Protocol
 
-from .types import Finding
+from .types import Finding, utcnow
 
 logger = logging.getLogger("nvrx_watch")
 
@@ -112,6 +112,7 @@ class WebhookSink:
         self._url = url
 
     def emit(self, finding: Finding) -> bool:
+        timestamp = utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
         return _post_json(
             self._url,
             {
@@ -120,7 +121,8 @@ class WebhookSink:
                 "severity": finding.severity,
                 "summary": finding.summary,
                 "detail": finding.detail,
-                "text": f"[{finding.severity.upper()}] {finding.summary}",
+                "timestamp": timestamp,
+                "text": f"[{timestamp}] [{finding.severity.upper()}] {finding.summary}",
             },
         )
 

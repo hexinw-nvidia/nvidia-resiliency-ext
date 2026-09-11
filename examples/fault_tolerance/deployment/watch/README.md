@@ -145,6 +145,9 @@ and a generic JSON webhook (`NVRX_WATCH_WEBHOOK_URL`) for Slack-compatible endpo
 Reporting is deliberately independent of the scheduler: if Slurm is unreachable, the
 alert path still works, so blindness itself pages.
 
+Webhook message text starts with the UTC emission time followed by severity, for example
+`[2026-09-11 03:12:00 UTC] [WARNING] ...`.
+
 Findings re-fire after `NVRX_WATCH_ALERT_COOLDOWN` (1h) so a persistent condition is
 never silently forgotten and a flapping one does not page every pass.
 

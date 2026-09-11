@@ -32,7 +32,7 @@ REPO_ROOT = os.path.join(os.path.dirname(__file__), "..", "..", "..")
 WATCH_DIR = os.path.join(REPO_ROOT, "examples", "fault_tolerance", "deployment", "watch")
 sys.path.insert(0, os.path.abspath(WATCH_DIR))
 
-from nvrx_watch import detectors, parsing, persistence, readers, runner, types  # noqa: E402
+from nvrx_watch import detectors, parsing, persistence, readers, runner, sinks, types  # noqa: E402
 from nvrx_watch.config import Config  # noqa: E402
 from nvrx_watch.platform import NullPlatform, PlatformError, SlurmPlatform  # noqa: E402
 
@@ -1063,6 +1063,29 @@ class TestRunner:
         assert good.calls == 1  # accepted once, then cooled down -> no duplicate page
         assert "nvrx-chain-exhausted-chain\x00pagerduty" in alerts  # good sink cooled down
         assert "nvrx-chain-exhausted-chain\x00webhook" not in alerts  # bad sink still retries
+
+
+class TestSinks:
+    def test_webhook_text_includes_utc_timestamp(self, monkeypatch):
+        posted = {}
+        monkeypatch.setattr(sinks, "utcnow", lambda: NOW)
+        monkeypatch.setattr(
+            sinks,
+            "_post_json",
+            lambda url, payload: posted.update(url=url, payload=payload) or True,
+        )
+        finding = types.Finding(
+            key="cycle-1",
+            detector="cycle_restart",
+            severity=types.INFO,
+            summary="NVRx restart cycle 1 started.",
+        )
+
+        assert sinks.WebhookSink("https://example.invalid/hook").emit(finding)
+        assert posted["payload"]["timestamp"] == "2026-07-30 12:00:00 UTC"
+        assert posted["payload"]["text"] == (
+            "[2026-07-30 12:00:00 UTC] [INFO] NVRx restart cycle 1 started."
+        )
 
 
 class TestCliJobIdResolution:
