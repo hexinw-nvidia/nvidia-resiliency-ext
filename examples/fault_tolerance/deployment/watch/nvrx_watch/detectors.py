@@ -260,7 +260,7 @@ def cycle_restart(snapshot: Snapshot, config: Config) -> list[Finding]:
             detector="cycle_restart",
             severity=INFO,
             summary=(
-                f"NVRx restart cycle {cycle.cycle_number} started for generation "
+                f"NVRx restart cycle {cycle.cycle_number} started for Slurm job array "
                 f"{cycle.job_id}."
             ),
             detail=(

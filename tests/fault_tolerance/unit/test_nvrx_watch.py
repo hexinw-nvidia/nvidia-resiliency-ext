@@ -450,7 +450,7 @@ class TestCycleRestart:
         )
         findings = detectors.cycle_restart(snap, config)
         assert len(findings) == 1
-        assert "generation job2" in findings[0].summary
+        assert findings[0].summary == "NVRx restart cycle 0 started for Slurm job array job2."
 
     def test_missing_cursor_uses_last_pass_without_replaying_history(self, config):
         config.notify_cycle_restarts = True
