@@ -634,6 +634,14 @@ class TestSparesExhausted:
         )
         assert detectors.spares_exhausted(snap, config) == []
 
+    def test_platform_unavailable_is_quiet(self, config):
+        snap = make_snapshot(
+            capabilities=(types.CAP_CYCLES, types.CAP_CHECKPOINT),
+            cycles=(cycle(0, standby=""),),
+        )
+        findings = detectors.run(snap, config)
+        assert all(finding.detector != "spares_exhausted" for finding in findings)
+
 
 class TestSuspectNode:
     def test_node_common_to_consecutive_short_cycles(self, config):

@@ -448,13 +448,12 @@ def spares_exhausted(snapshot: Snapshot, config: Config) -> list[Finding]:
     latest = snapshot.latest_cycle
     if latest is None or latest.standby_nodes.strip():
         return []
-    if snapshot.has(CAP_PLATFORM):
-        generation = next(
-            (g for g in snapshot.generations if g.gen_id == latest.job_id),
-            None,
-        )
-        if generation is None or generation.pending:
-            return []
+    generation = next(
+        (g for g in snapshot.generations if g.gen_id == latest.job_id),
+        None,
+    )
+    if generation is None or generation.pending:
+        return []
     return [
         Finding(
             key=f"nvrx-spares-exhausted-{latest.job_id}",
@@ -527,7 +526,7 @@ ALL: tuple[Detector, ...] = (
     Detector("stalled_progress", (CAP_CYCLES, CAP_CHECKPOINT), stalled_progress),
     Detector("cycle_stalled", (CAP_CYCLES,), cycle_stalled),
     Detector("restart_budget_low", (CAP_CYCLES,), restart_budget_low),
-    Detector("spares_exhausted", (CAP_CYCLES,), spares_exhausted),
+    Detector("spares_exhausted", (CAP_CYCLES, CAP_PLATFORM), spares_exhausted),
     Detector("suspect_node", (CAP_CYCLES,), suspect_node),
 )
 
