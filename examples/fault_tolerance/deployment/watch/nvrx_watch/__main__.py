@@ -51,6 +51,24 @@ def build_parser() -> argparse.ArgumentParser:
         "work dir are resolved from Slurm.",
     )
     parser.add_argument("--config", help="JSON config file; CLI flags and env override it")
+    parser.add_argument(
+        "--discover-users", help="discover InJob singleton chains for these comma-separated users"
+    )
+    parser.add_argument(
+        "--discovery-interval",
+        type=float,
+        help="minimum seconds between queue queries per user (default 600)",
+    )
+    parser.add_argument(
+        "--discovery-retry-seconds",
+        type=float,
+        help="retry unresolved script metadata after this delay (default 3600)",
+    )
+    parser.add_argument(
+        "--discovery-retire-seconds",
+        type=float,
+        help="retire absent chains after this grace period (default 1200)",
+    )
     parser.add_argument("--job-name", help="override the job name (else derived from job_id)")
     parser.add_argument("--work-dir", help="override NVRX_WORK_DIR (else derived from job_id)")
     parser.add_argument("--cycle-info-glob", help="override the cycle-info file glob")
@@ -145,6 +163,20 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     configure_logging(config.log_file, args.verbose, config.dry_run)
+    if config.discover_users:
+        from . import discovery
+
+        try:
+            discovery.validate(config)
+        except ValueError as exc:
+            print(f"config error: {exc}", file=sys.stderr)
+            return 1
+        if args.interval is not None:
+            print(
+                "discovery uses cron and persistent query budgets; omit --interval", file=sys.stderr
+            )
+            return 1
+        return discovery.run_once(config)
     plat = platform_module.create(config.platform, timeout=config.command_timeout, user=config.user)
 
     # Resolve a job id into job name and owner -- so the whole invocation is

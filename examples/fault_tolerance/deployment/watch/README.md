@@ -78,9 +78,9 @@ sent), `2` at least one critical finding.
 
 ## Deploy it
 
-Cron on every login node. Every action is a no-op when there is nothing to do, and the
-pager dedups on a deterministic key, so three login nodes collapse into one incident —
-and a login node going down does not take the watcher with it.
+Use one login node and a persistent state directory. Multiple independent watchers can
+duplicate scheduler queries and Slack notifications. Protect a single-chain invocation
+with `flock`; discovery mode below takes its own lock across the entire pass.
 
 ```cron
 # SRE monitoring a team's chain -- just the job id; name, owner and work dir resolve
@@ -91,6 +91,118 @@ and a login node going down does not take the watcher with it.
 
 `--interval N` runs it as a daemon instead, though cron is preferred: it restarts the
 watcher for free if it dies, which is one less thing to watch.
+
+### Discover singleton chains for a user list
+
+Discovery mode watches new chains without creating a cron entry for each job ID:
+
+```bash
+python3 -m nvrx_watch --discover-users dnarayanan,another_user \
+    --state-dir "$HOME/.local/state/nvrx-watch/discovery" --dry-run
+```
+
+`another_user` is a placeholder; replace it with a real Slurm user. Discovery is
+observe-only and rejects `--act`, a seed job ID, `--user`, global runtime-path overrides,
+and `--interval`. It reuses the normal alert configuration and detectors. For example:
+
+```json
+{
+  "discover_users": ["dnarayanan", "another_user"],
+  "discovery_interval": 600,
+  "discovery_retry_seconds": 3600,
+  "discovery_retire_seconds": 1200,
+  "state_dir": "/home/hexinw/.local/state/nvrx-watch/discovery",
+  "notify_cycle_restarts": true,
+  "disable": ["generation_churn"]
+}
+```
+
+Admission requires both:
+
+1. The live job comment parses as JSON with **`APS.nvrx == "enabled"`**. Whitespace,
+   other keys, and key order do not matter. Missing/disabled/malformed markers do not
+   enroll a job; a suggestive job name is not sufficient.
+2. The readable batch script has an active **`#SBATCH --dependency=singleton`**
+   directive (space-separated `--dependency singleton` and `-d singleton` also work).
+   Only the SBATCH header before the first executable line is considered, and the last
+   dependency option wins. A dependency already satisfied may disappear from Slurm, so
+   discovery does not require `singleton` in the current dependency field.
+
+Each single-user `squeue` includes the array ID, task index/state, owner/name, Command,
+WorkDir, and Comment. Pending ranges stay compact and are expanded locally with a size
+bound. Command paths such as `../run.sh` are resolved against Slurm's WorkDir. Scripts
+and bounded source includes are read as text, never executed. This avoids `scontrol`
+lookups and does not require permission to retrieve another user's submitted script.
+The on-disk script is evidence of the configuration, not an immutable submitted copy;
+command-line overrides and later file edits cannot be reconstructed from it.
+
+Cycle/checkpoint paths are resolved using the existing parser. A missing singleton
+directive or unresolved cycle path produces a deduplicated observer warning and no
+enrollment. At most eight new/retry script inspections occur per invocation; unsuccessful
+inspections retry after an hour. If only the checkpoint path is unresolved, cycle checks
+remain available, a warning is logged, and checkpoint-based stall checks are disabled.
+Literal `--max-restarts` values in the main script are cached when available.
+
+#### Scheduler budget and lifecycle
+
+- Each invocation performs **at most one `squeue` for one user**, never a comma-separated
+  multi-user scheduler query. Users are staggered; each is queried no more often than
+  `discovery_interval` (ten minutes by default). Cron cadence can make this longer.
+- There are **no `scontrol` calls**. All chains reuse cached metadata and task states;
+  there is no per-chain subprocess fan-out. The registry records the next query time
+  before contacting Slurm, so an interrupted pass does not reset the budget.
+- When known arrays lose task 0 or leave the queue, at most **one batched `sacct`** is
+  issued for the selected user, with up to 128 task-0 IDs. Terminal results are cached.
+  Accounting covers arrays discovered by this watcher, not arbitrary historical jobs.
+- Query failures back off exponentially (up to 16 times the configured interval).
+  An unavailable queue is not an empty queue. Failed or expired snapshots skip
+  scheduler-dependent detectors while file-based checks continue; no healthy heartbeat
+  is emitted. Queue snapshots expire after twice the discovery interval.
+- Chains are identified by owner, job name, and resolved runtime paths within this
+  cluster's registry. Successor arrays join the same chain without resolving an old
+  seed job. Different owners or runtime paths have separate state and alert cooldowns.
+  Cycle reads are restricted to admitted array IDs, excluding older unrelated runs.
+- After successful observations show no queued/running members for the retirement
+  grace, and terminal accounting is known, the chain becomes dormant. Its state files
+  remain available. A later run starts fresh state; reuse of the same name and paths
+  before retirement is treated as continuation of the existing chain.
+- Alerts include `[owner/job-name]`. The first observed cycle establishes a baseline;
+  subsequent cycle notifications use the existing deduplication behavior.
+
+With three users, a ten-minute minimum interval permits at most 18 discovery `squeue`
+invocations per hour in steady state, plus conditional accounting. These are command
+budgets, not measured controller CPU costs; response size still depends on queue size.
+Shared-filesystem reads also have a cost. Size/count caps do not bound a blocked Lustre
+read's duration; use an outer timeout for the whole pass.
+
+Install cron on **one login node only** after checking a dry run. For example, a private
+wrapper loads the existing webhook credential and invokes discovery:
+
+```sh
+#!/bin/sh
+set -eu
+export PATH=/cm/local/apps/slurm/current/bin:/cm/local/apps/python3/bin:/usr/bin:/bin
+secret=/home/hexinw/.config/nvrx-watch/3666126.slack-webhook
+case "$(stat -c '%a' "$secret")" in 400|600) ;; *) exit 78 ;; esac
+IFS= read -r NVRX_WATCH_WEBHOOK_URL < "$secret"
+export NVRX_WATCH_WEBHOOK_URL
+cd /path/to/nvidia-resiliency-ext/examples/fault_tolerance/deployment/watch
+exec /cm/local/apps/python3/bin/python3 -m nvrx_watch \
+    --config /home/hexinw/.config/nvrx-watch/discovery.json
+```
+
+Create the private state directory before installing this single-line cron entry:
+
+```cron
+*/3 * * * * /usr/bin/timeout -k 10s 150s /home/hexinw/.local/bin/nvrx-watch-discovery >> /home/hexinw/.local/state/nvrx-watch/discovery/cron.log 2>&1
+```
+
+This checks cycle files every three minutes while the persisted scheduler budget controls
+discovery separately. `discovery.lock` prevents overlapping passes, and `discovery.json`
+stores the registry atomically. Use a separate state directory for each cluster. Remove
+overlapping per-job watcher cron entries during migration, preserving their state and
+configurations. Never place the webhook URL in the crontab or registry. Dry runs query
+Slurm but do not advance persistent budgets or send notifications; do not schedule them.
 
 ### Two operator personas
 
@@ -154,7 +266,7 @@ never silently forgotten and a flapping one does not page every pass.
 ## Tests
 
 ```bash
-pytest -s -vvv tests/fault_tolerance/unit/test_nvrx_watch.py
+pytest -s -vvv tests/fault_tolerance/unit/test_nvrx_watch*.py
 ```
 
 Detectors are pure functions over a snapshot, so the tests need no cluster and no

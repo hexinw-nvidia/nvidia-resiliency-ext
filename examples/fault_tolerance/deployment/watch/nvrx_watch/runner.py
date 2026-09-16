@@ -117,7 +117,7 @@ def gather(config: Config, platform: Platform) -> tuple[Snapshot, list[Finding]]
                 )
             )
 
-    cycle_records = readers.read_cycles(config.resolved_cycle_info_glob)
+    cycle_records = readers.read_cycles(config.resolved_cycle_info_glob, config.cycle_job_ids)
     if cycle_records:
         capabilities.add(CAP_CYCLES)
     elif config.resolved_cycle_info_glob:
@@ -233,6 +233,6 @@ def run_once(config: Config, platform: Platform, sink_list: list | None = None) 
         summarize(findings),
         " (degraded: no heartbeat sent)" if result.degraded else "",
     )
-    if not result.degraded:
+    if not result.degraded and not config.dry_run:
         sinks.heartbeat(config.heartbeat_url)
     return result

@@ -61,7 +61,7 @@ def parse_cycle_file(path: str) -> CycleRecord | None:
     )
 
 
-def read_cycles(pattern: str) -> tuple[CycleRecord, ...]:
+def read_cycles(pattern: str, job_ids: tuple[str, ...] = ()) -> tuple[CycleRecord, ...]:
     """Read every cycle-info file matching ``pattern``, skipping the .current symlinks.
 
     The symlink duplicates a file already in the glob; counting it would inflate every
@@ -70,11 +70,14 @@ def read_cycles(pattern: str) -> tuple[CycleRecord, ...]:
     if not pattern:
         return ()
     records: dict[str, CycleRecord] = {}
+    allowed = set(job_ids)
     for path in sorted(glob.glob(pattern)):
+        if allowed and os.path.basename(path).partition(".")[2].partition(".")[0] not in allowed:
+            continue
         if path.endswith(".current") or os.path.islink(path):
             continue
         record = parse_cycle_file(path)
-        if record is not None:
+        if record is not None and (not allowed or record.job_id in allowed):
             records[record.key] = record
     return tuple(records.values())
 

@@ -35,6 +35,11 @@ class Config:
     checkpoint_iteration_file: str = ""  # overrides the work-dir layout when set
     platform: str = "slurm"  # "slurm" or "none" (cycle-info-only mode)
     max_restarts: int | None = None  # ft_launcher --max-restarts, for restart_budget_low
+    discover_users: tuple[str, ...] = ()  # opt-in multi-chain discovery; one user per query
+    discovery_interval: float = 600.0  # minimum seconds between queries for a user
+    discovery_retry_seconds: float = 3600.0  # retry unreadable/unresolved batch scripts
+    discovery_retire_seconds: float = 1200.0  # grace after a successful empty observation
+    cycle_job_ids: tuple[str, ...] = ()  # discovery limits history to verified arrays
 
     # --- behaviour -----------------------------------------------------------------
     dry_run: bool = False
@@ -84,6 +89,11 @@ class Config:
             self.disable = tuple(d.strip() for d in self.disable.split(",") if d.strip())
         else:
             self.disable = tuple(self.disable)
+        for name in ("discover_users", "cycle_job_ids"):
+            value = getattr(self, name)
+            if isinstance(value, str):
+                value = [item.strip() for item in value.split(",") if item.strip()]
+            setattr(self, name, tuple(dict.fromkeys(value)))
 
     # --- derived paths -------------------------------------------------------------
     @property
@@ -116,7 +126,7 @@ class Config:
 
 
 def _coerce(name: str, raw: str, current: Any) -> Any:
-    if name == "disable":
+    if name in ("disable", "discover_users", "cycle_job_ids"):
         return tuple(d.strip() for d in raw.split(",") if d.strip())
     if isinstance(current, bool):
         return raw.strip().lower() in ("1", "true", "yes", "on")
