@@ -143,6 +143,14 @@ inspections retry after an hour. If only the checkpoint path is unresolved, cycl
 remain available, a warning is logged, and checkpoint-based stall checks are disabled.
 Literal `--max-restarts` values in the main script are cached when available.
 
+Discovery sends one informational **"Discovered InJob; monitoring started"** notification
+per enrolled chain, identifying the owner, job name, and a running array when available.
+This is separate from restart alerts: the first cycle still establishes the restart
+baseline. Successful delivery is recorded per sink in `discovery.json`; failed sends
+retry on subsequent passes. Successor arrays and alert cooldown expiry do not repeat
+the enrollment notification. Existing enrolled chains get one notice after upgrading.
+This notification adds no Slurm queries and is suppressed by `--dry-run`.
+
 #### Scheduler budget and lifecycle
 
 - Each invocation performs **at most one `squeue` for one user**, never a comma-separated

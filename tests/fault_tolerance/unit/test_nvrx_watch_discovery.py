@@ -405,3 +405,65 @@ def test_unresolved_paths_do_not_run_shell(tmp_path):
     metadata, reason = discovery.resolve_metadata(dict(command=str(script), workdir=str(tmp_path)))
     assert metadata is None and "could not resolve" in reason
     assert not touched.exists()
+
+
+def test_discovery_notice_once_across_successors_and_cooldown(harness):
+    h = harness
+    cfg = h.config()
+    cfg.discover_users = ("alice",)
+    h.queues["alice"] = h.row(jid="100", state="PENDING") + h.row(jid="101")
+    assert h.run(cfg) == 0
+    notices = [f for f in h.messages if f.detector == "injob_discovered"]
+    assert len(notices) == 1
+    assert notices[0].summary == (
+        "[alice/train] Discovered InJob; monitoring started for Slurm job array 101."
+    )
+    assert len(h.calls) == 1  # enrollment adds no scheduler queries
+    for _ in range(2):
+        h.now += 86400
+        h.queues["alice"] = h.row(jid="101") + h.row(jid="102", state="PENDING")
+        h.run(cfg)
+    assert len([f for f in h.messages if f.detector == "injob_discovered"]) == 1
+
+
+def test_discovery_notice_retries_only_failed_sink(harness, monkeypatch):
+    h = harness
+    h.queues["alice"] = h.row()
+    deliveries = {"good": [], "retry": []}
+
+    class Sink:
+        def __init__(self, name):
+            self.name = name
+
+        def emit(self, finding):
+            deliveries[self.name].append(finding)
+            return self.name == "good" or len(deliveries[self.name]) > 1
+
+    monkeypatch.setattr(sinks, "build", lambda config: [Sink("good"), Sink("retry")])
+    assert h.run() == 0
+    chain = next(iter(h.registry()["chains"].values()))
+    assert chain["discovery_notice"]["sent"] == ["good"]
+    h.now += 180
+    assert h.run() == 0
+    assert len(deliveries["good"]) == 1
+    assert len(deliveries["retry"]) == 2
+    assert deliveries["retry"][0] == deliveries["retry"][1]
+    assert len(h.calls) == 1  # retry uses cached data, with no scheduler query
+    chain = next(iter(h.registry()["chains"].values()))
+    assert chain["discovery_notice"]["sent"] == ["good", "retry"]
+
+
+def test_existing_chain_gets_one_discovery_notice_after_upgrade(harness):
+    h = harness
+    h.queues["alice"] = h.row()
+    h.run()
+    registry = h.registry()
+    for chain in registry["chains"].values():
+        chain.pop("discovery_notice")
+    path = Path(h.config().state_dir) / "discovery.json"
+    path.write_text(json.dumps(registry))
+    h.messages.clear()
+    h.now += 180
+    h.run()
+    h.run()
+    assert len([f for f in h.messages if f.detector == "injob_discovered"]) == 1

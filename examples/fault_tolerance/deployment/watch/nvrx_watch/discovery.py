@@ -36,7 +36,7 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
-from . import parsing, runner, sinks
+from . import discovery_notice, parsing, runner, sinks
 from .config import Config
 from .platform import NullPlatform, PlatformError, SlurmPlatform, _parse_slurm_time
 from .types import WARNING, ChainGeneration, Finding, TaskInfo
@@ -507,6 +507,8 @@ def _pass(config, registry, now, save):
         try:
             chain_sinks = [ChainSink(s, user, chain["name"]) for s in sinks.build(cfg)]
             result = runner.run_once(cfg, cached, sink_list=chain_sinks)
+            if not result.degraded:
+                discovery_notice.notify(cfg, key, chain, result.snapshot, chain_sinks, save)
             exit_code = 1 if result.degraded or exit_code == 1 else max(exit_code, result.exit_code)
         except Exception:
             logger.exception("watch failed for %s/%s", user, chain["name"])
