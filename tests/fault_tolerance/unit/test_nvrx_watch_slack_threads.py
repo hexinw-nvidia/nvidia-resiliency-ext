@@ -144,7 +144,7 @@ def test_slack_success_and_private_token_permissions(setup, tmp_path, monkeypatc
     def success(req, **kw):
         payload = json.loads(req.data)
         assert payload["channel"] == "C123"
-        assert ev["event_id"][:12] in payload["text"]
+        assert ev["event_id"][:12] not in payload["text"]
         return io.BytesIO(b'{"ok":true,"channel":"C123","ts":"123.456"}')
 
     monkeypatch.setattr(slack_threads.urllib.request, "urlopen", success)

@@ -72,9 +72,7 @@ def post_parent(config, event):
         text += f", attempt {cycle['attempt_index']}, cycle {cycle['cycle_number']}"
     if terminal:
         text += f": {terminal['state']}"
-    text += (
-        f".\nDiagnosis and validation will follow in this thread.\nEvent: {event['event_id'][:12]}"
-    )
+    text += ".\nDiagnosis and validation will follow in this thread."
     request = urllib.request.Request(
         "https://slack.com/api/chat.postMessage",
         data=json.dumps(
