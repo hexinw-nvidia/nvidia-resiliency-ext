@@ -21,7 +21,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 
-from . import detectors, persistence, readers, sinks
+from . import detectors, events, persistence, readers, sinks
 from .config import Config
 from .platform import Platform, PlatformError
 from .types import (
@@ -83,6 +83,12 @@ def gather(config: Config, platform: Platform) -> tuple[Snapshot, list[Finding]]
             )
 
     if CAP_PLATFORM in capabilities:
+        # Discovery exposes all already-cached terminal records without extra RPCs.
+        # Retain delayed accounting for analysis even after the churn window expires.
+        if config.event_queue_dir:
+            terminal.update(
+                {(jid, 0): task for jid, task in getattr(platform, "cached_endings", ())}
+            )
         # sacct feeds orphaned_generation (terminal_info, per generation) and
         # chain_not_cancelled / generation_churn (recent_endings, one call). Query each
         # independently: one generation's terminal_info failure must not skip the other
@@ -216,12 +222,22 @@ def run_once(config: Config, platform: Platform, sink_list: list | None = None) 
     result = PassResult(findings=findings, snapshot=snapshot)
     result.degraded = any(f.detector == "observer" for f in findings)
 
+    # Enqueue before advancing the cursor, independently of Slack delivery/cooldown.
+    # Keep immediate alerts working if the outbox fails, but retry the event next pass.
+    queued = True
+    try:
+        events.enqueue(snapshot, config)
+    except (OSError, ValueError):
+        logger.exception("analysis outbox failed; observation cursor retained for retry")
+        queued = False
+        result.degraded = True
+
     result.actions_taken = apply_actions(findings, config, platform)
     report(findings, config, sink_list)
 
     # Persist observation state after reporting, so a crash mid-pass re-reports rather
     # than silently advancing the stall timers.
-    if not config.dry_run:
+    if not config.dry_run and queued:
         prior, alerts = persistence.load(config.state_file)
         advanced = persistence.advance(
             prior, snapshot.checkpoint, snapshot.latest_cycle, snapshot.observed_at

@@ -83,6 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         help="ft_launcher --max-restarts, for the restart-budget detector",
     )
+    parser.add_argument("--event-queue-dir", help="durable outbox for local skill analysis")
+    parser.add_argument("--cluster", help="stable cluster label for analysis events")
     parser.add_argument("--state-dir", help="watcher state and log directory")
     parser.add_argument(
         "--user", help="scope squeue/sacct to this owner (else derived from job_id)"

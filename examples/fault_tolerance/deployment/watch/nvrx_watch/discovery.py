@@ -393,6 +393,19 @@ class CachedPlatform(NullPlatform):
             datetime.fromisoformat(raw["end"]),
         )
 
+    @property
+    def cached_endings(self):
+        """Known terminal records, including evidence delayed beyond the churn window.
+
+        The analysis outbox needs these until retirement. This property never queries
+        Slurm and preserves successful records even if other accounting rows failed.
+        """
+        return [
+            (jid, self.terminal_info(jid, 0))
+            for jid in self.chain["ids"]
+            if jid in self.entry.get("terminal", {})
+        ]
+
     def recent_endings(self, job_name, since_seconds):
         if self.entry.get("accounting_error"):
             raise PlatformError(self.entry["accounting_error"])
@@ -467,6 +480,7 @@ def _pass(config, registry, now, save):
             not entry.get("error")
             and now - entry.get("observed", 0) <= config.discovery_interval * 2
         )
+        retire = False
         if healthy:
             if known:
                 chain["absent_since"] = None
@@ -477,9 +491,7 @@ def _pass(config, registry, now, save):
             ] >= config.discovery_retire_seconds and all(
                 jid in entry.get("terminal", {}) for jid in chain["ids"]
             ):
-                logger.info("retiring discovery chain %s/%s", user, chain["name"])
-                del registry["chains"][key]
-                continue
+                retire = True
         state = str(Path(config.state_dir) / "chains" / f"{key}-{chain['first_id']}")
         disabled = set(config.disable)
         if not chain["config"]["checkpoint_iteration_file"]:
@@ -507,8 +519,11 @@ def _pass(config, registry, now, save):
         try:
             chain_sinks = [ChainSink(s, user, chain["name"]) for s in sinks.build(cfg)]
             result = runner.run_once(cfg, cached, sink_list=chain_sinks)
-            if not result.degraded:
+            if not retire and not result.degraded:
                 discovery_notice.notify(cfg, key, chain, result.snapshot, chain_sinks, save)
+            if retire and not result.degraded:
+                logger.info("retiring discovery chain %s/%s", user, chain["name"])
+                del registry["chains"][key]
             exit_code = 1 if result.degraded or exit_code == 1 else max(exit_code, result.exit_code)
         except Exception:
             logger.exception("watch failed for %s/%s", user, chain["name"])

@@ -14,6 +14,38 @@ Stdlib only, no install: it runs on a login node outside the training container,
 [DESIGN.md](DESIGN.md) has the architecture, the full detector catalog and the
 reasoning behind the thresholds.
 
+## Hand off restarts to a local analysis worker
+
+Set `event_queue_dir` (an absolute private path) and `cluster` in the JSON config,
+or use `--event-queue-dir` / `--cluster`. This opt-in writes durable events for new
+cycles, array/attempt transitions, and observed task-0 failures. The first pass
+establishes a baseline; historical restarts are not replayed. It adds no scheduler
+queries and runs no analysis on the login node. Existing restart alerts continue
+independently of event delivery.
+
+The consumer can retrieve a bounded batch over SSH from this directory:
+
+```sh
+python3 -m nvrx_watch.events export --queue /private/path/events --limit 20
+# Only after durably saving the returned records on the local machine:
+python3 -m nvrx_watch.events ack --queue /private/path/events --ids EVENT_ID
+```
+
+Schema version 1 records include exact predecessor/successor cycle identities,
+log and cycle-info paths, owner/chain, checkpoint observation, and cached
+scheduler context. Credentials are never copied into events. Enqueue failures
+retain the observation cursor for retry while the immediate notification path
+continues. Discovery runs a final pass before retiring a chain to preserve its
+terminal-failure event.
+
+`pending/` holds undelivered events; `delivered/` holds receipts after the local
+consumer takes responsibility. Retain receipts for active chains to deduplicate
+terminal failures and crash replay. Use one durable consumer/state directory per
+outbox. Dry-run writes no events or baseline. This directory is a handoff API;
+the optional `bin/nvrx_watch_local.py` consumer in `nvidia-experiment` invokes
+the local diagnosis/validation skills and documents setup in
+`docs/nvrx-watch-local.md` in that repository.
+
 ## Run it
 
 Give it a **Slurm job id** — any generation of the chain — and it resolves the rest from

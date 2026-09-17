@@ -71,6 +71,10 @@ class Config:
     suspect_cycles: int = 3
     budget_fraction: float = 0.8
 
+    # --- local analysis handoff ----------------------------------------------------
+    event_queue_dir: str = ""  # opt-in durable outbox; no analysis runs on the cluster
+    cluster: str = ""  # stable label in analysis events (defaults to watcher hostname)
+
     # --- reporting -----------------------------------------------------------------
     heartbeat_url: str = ""
     pd_routing_key: str = ""
@@ -81,6 +85,8 @@ class Config:
     disable: tuple[str, ...] = ()  # detector names to skip
 
     def __post_init__(self) -> None:
+        if self.event_queue_dir and not os.path.isabs(self.event_queue_dir):
+            raise ValueError("event_queue_dir must be an absolute private path")
         home = os.path.expanduser("~")
         self.state_dir = self.state_dir or os.path.join(home, ".nvrx_watch")
         self.expect_file = self.expect_file or os.path.join(home, ".nvrx_watch_expect_chain")
