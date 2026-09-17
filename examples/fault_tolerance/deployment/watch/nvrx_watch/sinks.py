@@ -53,7 +53,7 @@ def _post_json(url: str, payload: dict) -> bool:
         with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:
             return 200 <= response.status < 300
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        logger.warning("POST to %s failed: %s", url.split("?")[0], exc)
+        logger.warning("notification POST failed (%s)", type(exc).__name__)
         return False
 
 

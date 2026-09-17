@@ -64,6 +64,7 @@ def build_event(snapshot, config, kind, previous, current, terminal=None):
     event_id = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
     return {
         "schema_version": 1,
+        "slack_thread_required": bool(config.slack_bot_token_file),
         "event_id": event_id,
         "kind": kind,
         "cluster": cluster,
@@ -147,6 +148,10 @@ def enqueue(snapshot: Snapshot, config: Config) -> list[str]:
     for payload in payloads:
         name = payload["event_id"] + ".json"
         if not (queue / "pending" / name).exists() and not (queue / "delivered" / name).exists():
+            # Persist the parent notification before exporting the analysis event.
+            # A crash here retries safely using the immutable event ID.
+            if payload["slack_thread_required"]:
+                atomic_json(queue / "slack-pending" / name, payload)
             atomic_json(queue / "pending" / name, payload)
         saved.append(payload["event_id"])
     return saved
@@ -186,13 +191,17 @@ def acknowledge(queue: Path, ids: list[str]) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("export", "ack"))
+    parser.add_argument("operation", choices=("export", "ack", "slack-receipts"))
     parser.add_argument("--queue", required=True, type=Path)
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--ids", nargs="*", default=[])
     args = parser.parse_args()
     if args.operation == "export":
         print(json.dumps(export(args.queue, args.limit)))
+    elif args.operation == "slack-receipts":
+        from .slack_threads import receipts
+
+        print(json.dumps(receipts(args.queue, args.ids)))
     else:
         acknowledge(args.queue, args.ids)
 

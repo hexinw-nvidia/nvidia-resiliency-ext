@@ -183,13 +183,15 @@ def apply_actions(findings: list[Finding], config: Config, platform: Platform) -
     return applied
 
 
-def report(findings: list[Finding], config: Config, sink_list: list) -> None:
+def report(findings: list[Finding], config: Config, sink_list: list, threaded_keys=()) -> None:
     """Emit findings, honouring the dedup cooldown so a persistent condition pages
     periodically rather than every pass -- and is never silently forgotten."""
     prior, alerts = persistence.load(config.state_file)
     now = utcnow()
     for finding in findings:
         for sink in sink_list:
+            if sink.name == "webhook" and finding.key in threaded_keys:
+                continue  # This event has a durable Slack API parent notification.
             # The log sink is local visibility, not paging: it emits every pass, ungated
             # and unrecorded.
             if sink.name == "log":
@@ -225,15 +227,20 @@ def run_once(config: Config, platform: Platform, sink_list: list | None = None) 
     # Enqueue before advancing the cursor, independently of Slack delivery/cooldown.
     # Keep immediate alerts working if the outbox fails, but retry the event next pass.
     queued = True
+    threaded_keys = set()
     try:
-        events.enqueue(snapshot, config)
+        event_ids = events.enqueue(snapshot, config)
+        if config.slack_bot_token_file:
+            from .slack_threads import cycle_finding_keys
+
+            threaded_keys = cycle_finding_keys(config, event_ids)
     except (OSError, ValueError):
         logger.exception("analysis outbox failed; observation cursor retained for retry")
         queued = False
         result.degraded = True
 
     result.actions_taken = apply_actions(findings, config, platform)
-    report(findings, config, sink_list)
+    report(findings, config, sink_list, threaded_keys)
 
     # Persist observation state after reporting, so a crash mid-pass re-reports rather
     # than silently advancing the stall timers.
@@ -243,6 +250,12 @@ def run_once(config: Config, platform: Platform, sink_list: list | None = None) 
             prior, snapshot.checkpoint, snapshot.latest_cycle, snapshot.observed_at
         )
         persistence.save(config.state_file, advanced, alerts)
+
+    if config.slack_bot_token_file and not config.cycle_job_ids:
+        from .slack_threads import flush
+
+        if not flush(config):
+            result.degraded = True
 
     logger.info(
         "pass complete: %s%s",

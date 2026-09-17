@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import asdict, dataclass, fields
 from typing import Any
 
@@ -79,6 +80,8 @@ class Config:
     heartbeat_url: str = ""
     pd_routing_key: str = ""
     webhook_url: str = ""
+    slack_bot_token_file: str = ""
+    slack_channel_id: str = ""
     log_file: str = ""  # default <state_dir>/watch.log
 
     # --- detector selection --------------------------------------------------------
@@ -87,6 +90,13 @@ class Config:
     def __post_init__(self) -> None:
         if self.event_queue_dir and not os.path.isabs(self.event_queue_dir):
             raise ValueError("event_queue_dir must be an absolute private path")
+        if bool(self.slack_bot_token_file) != bool(self.slack_channel_id):
+            raise ValueError("slack_bot_token_file and slack_channel_id must be set together")
+        if self.slack_bot_token_file:
+            if not self.event_queue_dir or not os.path.isabs(self.slack_bot_token_file):
+                raise ValueError("Slack threads require event_queue_dir and an absolute token path")
+            if not re.fullmatch(r"[CG][A-Z0-9]+", self.slack_channel_id):
+                raise ValueError("invalid Slack channel ID")
         home = os.path.expanduser("~")
         self.state_dir = self.state_dir or os.path.join(home, ".nvrx_watch")
         self.expect_file = self.expect_file or os.path.join(home, ".nvrx_watch_expect_chain")

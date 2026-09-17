@@ -84,6 +84,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="ft_launcher --max-restarts, for the restart-budget detector",
     )
     parser.add_argument("--event-queue-dir", help="durable outbox for local skill analysis")
+    parser.add_argument(
+        "--slack-bot-token-file", help="private bot token for threaded event alerts"
+    )
+    parser.add_argument("--slack-channel-id", help="channel ID for threaded event alerts")
     parser.add_argument("--cluster", help="stable cluster label for analysis events")
     parser.add_argument("--state-dir", help="watcher state and log directory")
     parser.add_argument(

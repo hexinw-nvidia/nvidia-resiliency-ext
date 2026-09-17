@@ -311,3 +311,26 @@ pytest -s -vvv tests/fault_tolerance/unit/test_nvrx_watch*.py
 
 Detectors are pure functions over a snapshot, so the tests need no cluster and no
 subprocess.
+
+
+### Threaded local-analysis summaries
+
+With the local analysis outbox enabled, `slack_bot_token_file` and
+`slack_channel_id` opt new events into Slack threads. The mode-600 token file must
+contain a bot token with `chat:write`; invite the bot to the target channel.
+The token is read only by the watcher, never copied into event payloads.
+
+The watcher posts each event's parent with `chat.postMessage`, persists its
+channel/timestamp under `slack-receipts/`, and retries failures from
+`slack-pending/`. It attempts at most one parent per pass (15-second HTTP timeout),
+honors Slack Retry-After, and adds no scheduler queries. Existing cycle webhook
+posts are suppressed only when a durable threaded parent intent exists. Other
+findings and discovery notifications retain their existing sinks.
+
+The local runner must use the same `slack_channel_id` and an incoming webhook
+bound to that channel. It retrieves receipts using
+`python -m nvrx_watch.events slack-receipts --queue DIR --ids EVENT_ID`, then sends
+its summary with `thread_ts`. Receipt lookup works after event acknowledgement or
+chain retirement. Analysis proceeds independently of parent delivery. Existing
+events retain standalone notifications. Preserve receipts and pending intents;
+Slack acceptance and local persistence are not an exactly-once transaction.

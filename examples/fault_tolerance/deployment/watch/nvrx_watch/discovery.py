@@ -528,6 +528,11 @@ def _pass(config, registry, now, save):
         except Exception:
             logger.exception("watch failed for %s/%s", user, chain["name"])
             exit_code = 1
+    if config.slack_bot_token_file:
+        from .slack_threads import flush
+
+        if not flush(config):
+            exit_code = 1
     if (
         exit_code != 1
         and not config.dry_run
