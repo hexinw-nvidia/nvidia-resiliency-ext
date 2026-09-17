@@ -81,19 +81,34 @@ def test_first_observation_no_historical_replay(tmp_path):
     assert events.export(Path(config.event_queue_dir), 20) == []
 
 
-def test_new_array_and_attempt_are_transitions(setup):
+def test_new_array_and_attempt_cycle_zero_do_not_trigger_analysis(setup):
     config, snapshot, queue = setup
     successor = replace(cycle(0, "101"), start_time=NOW + timedelta(minutes=1))
     events.enqueue(replace(snapshot, cycles=(cycle(0), successor)), config)
-    record = events.export(queue, 1)[0]
-    assert record["kind"] == "generation_transition"
-    assert record["previous_cycle"]["job_id"] == "100"
-    assert record["cycle"]["job_id"] == "101"
+    assert events.export(queue, 1) == []
     events.enqueue(
         replace(snapshot, cycles=(cycle(0), replace(successor, job_id="100", attempt_index=1))),
         config,
     )
-    assert len(events.export(queue, 20)) == 2
+    assert events.export(queue, 20) == []
+
+
+def test_restart_pairs_only_same_job_attempt_predecessor(setup):
+    config, snapshot, queue = setup
+    other = replace(cycle(3), start_time=NOW + timedelta(seconds=70))
+    initial = replace(cycle(0, "101"), start_time=NOW + timedelta(seconds=60))
+    restart = replace(cycle(1, "101"), start_time=NOW + timedelta(seconds=90))
+    events.enqueue(replace(snapshot, cycles=(cycle(0), initial, other, restart)), config)
+    record = next(e for e in events.export(queue, 20) if e["cycle"]["job_id"] == "101")
+    assert record["kind"] == "cycle_restart"
+    assert record["previous_cycle"]["key"] == "101.0.0"
+
+
+def test_missing_predecessor_never_uses_another_job(setup):
+    config, snapshot, queue = setup
+    restart = replace(cycle(1, "101"), start_time=NOW + timedelta(minutes=2))
+    events.enqueue(replace(snapshot, cycles=(cycle(0), restart)), config)
+    assert events.export(queue, 1)[0]["previous_cycle"] is None
 
 
 def test_terminal_without_successor_and_delayed_accounting(setup):

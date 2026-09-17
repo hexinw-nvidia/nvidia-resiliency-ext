@@ -440,7 +440,7 @@ class TestCycleRestart:
         ]
         assert all(finding.severity == types.INFO for finding in findings)
 
-    def test_successor_generation_cycle_zero_is_reported(self, config):
+    def test_successor_generation_cycle_zero_is_not_a_restart(self, config):
         config.notify_cycle_restarts = True
         prior = cycle(4, job_id="job1", start_min_ago=20)
         successor = cycle(0, job_id="job2", start_min_ago=5)
@@ -449,8 +449,7 @@ class TestCycleRestart:
             prior=types.PriorState(latest_cycle_key=prior.key, last_pass=ago(minutes=10)),
         )
         findings = detectors.cycle_restart(snap, config)
-        assert len(findings) == 1
-        assert findings[0].summary == "NVRx restart cycle 0 started for Slurm job array job2."
+        assert findings == []
 
     def test_missing_cursor_uses_last_pass_without_replaying_history(self, config):
         config.notify_cycle_restarts = True

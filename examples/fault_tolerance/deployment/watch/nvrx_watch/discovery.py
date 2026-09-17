@@ -36,7 +36,7 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
-from . import discovery_notice, parsing, runner, sinks
+from . import accounting_notice, discovery_notice, parsing, runner, sinks
 from .config import Config
 from .platform import NullPlatform, PlatformError, SlurmPlatform, _parse_slurm_time
 from .types import WARNING, ChainGeneration, Finding, TaskInfo
@@ -309,8 +309,6 @@ def _accounting(config, registry, user, platform, now):
     """At most one sacct, only for known arrays whose task 0 needs terminal evidence."""
     entry = registry["users"][user]
     terminal = entry.setdefault("terminal", {})
-    if now < entry.get("next_accounting", 0):
-        return
     wanted = set()
     for chain in registry["chains"].values():
         if chain["user"] != user:
@@ -322,6 +320,11 @@ def _accounting(config, registry, user, platform, now):
                 wanted.add(jid)
     if not wanted:
         entry["accounting_error"] = ""
+        entry["accounting_incomplete_checks"] = 0
+        entry["accounting_missing"] = []
+        return
+    entry["accounting_missing"] = sorted(wanted, key=int)
+    if now < entry.get("next_accounting", 0):
         return
     selected = sorted(wanted, key=int)[:MAX_ACCOUNTING_JOBS]
     try:
@@ -334,9 +337,11 @@ def _accounting(config, registry, user, platform, now):
                 "-u",
                 user,
                 "-j",
-                ",".join(f"{jid}_0" for jid in selected),
+                # Never-materialized task 0 has no task-specific sacct row. For
+                # vanished arrays, request the parent and accept a compact row.
+                ",".join(f"{jid}_0" if jid in entry["arrays"] else jid for jid in selected),
                 "-o",
-                "JobID,State,End,ExitCode",
+                "JobID%128,State,End,ExitCode",
             ]
         )
         for line in output.splitlines():
@@ -344,23 +349,32 @@ def _accounting(config, registry, user, platform, now):
             if len(parts) < 4:
                 raise PlatformError("malformed discovery accounting response")
             jid, sep, task = parts[0].strip().partition("_")
-            if jid not in wanted or task != "0":
+            if jid not in wanted or not sep:
+                continue
+            if task != "0" and not (
+                task.startswith("[") and task.endswith("]") and 0 in _tasks(task)
+            ):
                 continue
             state = parts[1].strip().split()[0] if parts[1].strip() else ""
             end = _parse_slurm_time(parts[2])
             if state and not TaskInfo(0, state).is_live and end:
                 terminal[jid] = dict(state=state, end=end.isoformat(), code=parts[3].split(":")[0])
         missing = wanted - set(terminal)
+        entry["accounting_missing"] = sorted(missing, key=int)
         entry["accounting_error"] = (
             f"terminal accounting unavailable for {len(missing)} array(s)" if missing else ""
         )
         entry["accounting_failures"] = 0
+        entry["next_accounting"] = now + config.discovery_interval
     except PlatformError as exc:
         entry["accounting_error"] = str(exc)
         entry["accounting_failures"] = min(entry.get("accounting_failures", 0) + 1, 4)
         entry["next_accounting"] = (
             now + config.discovery_interval * 2 ** entry["accounting_failures"]
         )
+    entry["accounting_incomplete_checks"] = (
+        entry.get("accounting_incomplete_checks", 0) + 1 if entry["accounting_error"] else 0
+    )
 
 
 class CachedPlatform(NullPlatform):
@@ -407,8 +421,18 @@ class CachedPlatform(NullPlatform):
         ]
 
     def recent_endings(self, job_name, since_seconds):
-        if self.entry.get("accounting_error"):
-            raise PlatformError(self.entry["accounting_error"])
+        missing = [
+            jid
+            for jid in self.chain["ids"]
+            if jid not in self.entry.get("terminal", {})
+            and not TaskInfo(
+                0, self.entry.get("arrays", {}).get(jid, {}).get("tasks", {}).get("0", "")
+            ).is_live
+        ]
+        if missing:
+            raise PlatformError(
+                "terminal accounting unavailable for Slurm job arrays " + ", ".join(missing)
+            )
         result = []
         for jid in self.chain["ids"]:
             if jid in self.entry.get("terminal", {}):
@@ -426,6 +450,10 @@ class ChainSink:
         self.name = sink.name
 
     def emit(self, finding):
+        # Discovery owns accounting incident notifications across chains. Preserve
+        # local findings/degraded state, but do not page once per chain as well.
+        if self.name != "log" and finding.key.startswith("nvrx-watch-blind-accounting-"):
+            return True
         return self.sink.emit(
             replace(finding, summary=f"[{self.user}/{self.chain_name}] {finding.summary}")
         )
@@ -461,15 +489,11 @@ def _pass(config, registry, now, save):
                     f"discovery-blind-{user}", f"Discovery cannot observe {user}: {entry['error']}"
                 )
             )
-        if entry.get("accounting_error"):
-            findings.append(
-                _warning(
-                    f"discovery-accounting-{user}",
-                    f"Discovery accounting incomplete for {user}: {entry['accounting_error']}",
-                )
-            )
+        accounting_notice.notify(config, user, entry, sinks.build(config), now, save)
     runner.report(findings, config, sinks.build(config))
-    exit_code = 1 if findings else 0
+    exit_code = (
+        1 if findings or any(users[u].get("accounting_error") for u in config.discover_users) else 0
+    )
     for key, chain in list(registry["chains"].items()):
         user = chain["user"]
         if user not in config.discover_users:

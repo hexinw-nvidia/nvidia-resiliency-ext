@@ -121,13 +121,20 @@ def enqueue(snapshot: Snapshot, config: Config) -> list[str]:
             )
             if not new or cycle.start_time < since:
                 continue
-            previous = records[i - 1] if i else None
-            same_attempt = previous and (previous.job_id, previous.attempt_index) == (
-                cycle.job_id,
-                cycle.attempt_index,
+            # Cycle zero is initial startup, even when an older job/attempt was
+            # observed. A shared chain identity is not evidence of failure recovery.
+            if cycle.cycle_number == 0:
+                continue
+            previous = next(
+                (
+                    c
+                    for c in reversed(records[:i])
+                    if (c.job_id, c.attempt_index, c.cycle_number)
+                    == (cycle.job_id, cycle.attempt_index, cycle.cycle_number - 1)
+                ),
+                None,
             )
-            kind = "cycle_restart" if same_attempt else "generation_transition"
-            payloads.append(build_event(snapshot, config, kind, previous, cycle))
+            payloads.append(build_event(snapshot, config, "cycle_restart", previous, cycle))
     # Reconsider cached terminal evidence each pass: accounting can arrive late.
     # Queue/archive filenames deduplicate it, independent of the cycle cursor.
     terminal = dict(snapshot.recent_endings)

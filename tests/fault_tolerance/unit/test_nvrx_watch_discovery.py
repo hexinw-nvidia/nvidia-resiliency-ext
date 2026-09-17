@@ -244,7 +244,7 @@ def test_terminal_query_batched_and_chain_retires(harness):
     h.now += 600
     h.run(cfg)
     sacct = [c for c in h.calls if c[0] == "sacct"]
-    assert len(sacct) == 1 and sacct[0][sacct[0].index("-j") + 1] == "100_0,101_0"
+    assert len(sacct) == 1 and sacct[0][sacct[0].index("-j") + 1] == "100,101"
     h.now += 600
     h.run(cfg)
     h.now += 600
@@ -313,7 +313,7 @@ def test_unknown_accounting_preserves_chain_and_withholds_heartbeat(harness):
         assert h.run(cfg) == 1
     assert h.registry()["chains"]
     assert not any(h.beats)
-    assert any("accounting incomplete" in f.summary for f in h.messages)
+    assert any("Accounting incomplete" in f.summary for f in h.messages)
 
 
 def test_accounting_failure_backoff(harness):
@@ -467,3 +467,105 @@ def test_existing_chain_gets_one_discovery_notice_after_upgrade(harness):
     h.run()
     h.run()
     assert len([f for f in h.messages if f.detector == "injob_discovered"]) == 1
+
+
+def test_vanished_compact_cancelled_array_resolves_task_zero(harness):
+    h = harness
+    cfg = h.config()
+    cfg.discover_users = ("alice",)
+    h.queues["alice"] = h.row(task="[0-200%26]", state="PENDING")
+    h.run(cfg)
+    h.queues["alice"] = ""
+    h.accounting = "100_[0-200%26]|CANCELLED by 39367|2027-01-15T07:00:00|0:0|\n"
+    h.now += 600
+    h.run(cfg)
+    entry = h.registry()["users"]["alice"]
+    assert entry["terminal"]["100"]["state"] == "CANCELLED"
+    assert entry["accounting_error"] == ""
+    assert not entry["accounting_missing"]
+    query = [c for c in h.calls if c[0] == "sacct"]
+    assert len(query) == 1 and query[0][query[0].index("-j") + 1] == "100"
+    assert not any("accounting" in f.key for f in h.messages)
+
+
+@pytest.mark.parametrize("task", ["[1-200%26]", "[2-20:2]", "4", "0.batch"])
+def test_other_tasks_cannot_supply_terminal_state_for_zero(harness, task):
+    h = harness
+    cfg = h.config()
+    cfg.discover_users = ("alice",)
+    h.queues["alice"] = h.row()
+    h.run(cfg)
+    h.queues["alice"] = ""
+    h.accounting = f"100_{task}|CANCELLED|2027-01-15T07:00:00|0:0|\n"
+    h.now += 600
+    h.run(cfg)
+    assert "100" not in h.registry()["users"]["alice"]["terminal"]
+
+
+def test_accounting_incident_grace_scope_reminder_and_recovery(harness):
+    h = harness
+    cfg = h.config()
+    cfg.discover_users = ("alice",)
+    h.queues["alice"] = h.row(name="nano") + h.row(jid="200", name="smoke")
+    h.run(cfg)
+    h.messages.clear()
+    h.queues["alice"] = h.row(jid="200", name="smoke")
+    h.now += 600
+    assert h.run(cfg) == 1
+    assert not h.messages  # grace on the first incomplete accounting query
+    h.now += 180
+    h.run(cfg)
+    assert not h.messages  # cron ticks do not count as accounting checks
+    h.now += 420
+    h.run(cfg)
+    assert len(h.messages) == 1
+    assert h.messages[0].key == "discovery-accounting-alice"
+    reg = h.registry()
+    smoke = next(c for c in reg["chains"].values() if c["name"] == "smoke")
+    platform = discovery.CachedPlatform(reg["users"]["alice"], smoke, h.now, 1200)
+    assert platform.recent_endings("smoke", 3600) == []  # unrelated chain stays healthy
+    h.now += 3600
+    h.run(cfg)
+    assert len(h.messages) == 1  # no hourly discovery or chain duplicates
+    h.now += 5 * 3600
+    h.run(cfg)
+    assert len(h.messages) == 2  # one six-hour reminder
+    h.accounting = "100_[0-200%26]|CANCELLED|2027-01-15T07:00:00|0:0|\n"
+    h.now += 600
+    h.run(cfg)
+    assert len(h.messages) == 3
+    assert h.messages[-1].key == "discovery-accounting-recovered-alice"
+    assert h.messages[-1].severity == "info"
+    h.now += 180
+    h.run(cfg)
+    assert len(h.messages) == 3
+
+
+def test_accounting_notice_retries_only_failed_sink(harness, monkeypatch):
+    from nvrx_watch import accounting_notice
+
+    h = harness
+    entry = {
+        "accounting_error": "not yet visible",
+        "accounting_missing": ["100"],
+        "accounting_incomplete_checks": 2,
+    }
+    delivered = {"good": [], "retry": []}
+
+    class Sink:
+        def __init__(self, name):
+            self.name = name
+
+        def emit(self, finding):
+            delivered[self.name].append(finding.key)
+            return self.name == "good" or len(delivered[self.name]) > 1
+
+    outputs = [Sink("good"), Sink("retry")]
+    accounting_notice.notify(h.config(), "alice", entry, outputs, h.now, lambda: None)
+    accounting_notice.notify(h.config(), "alice", entry, outputs, h.now + 180, lambda: None)
+    assert len(delivered["good"]) == 1 and len(delivered["retry"]) == 2
+    entry["accounting_error"] = ""
+    accounting_notice.notify(h.config(), "alice", entry, outputs, h.now + 360, lambda: None)
+    accounting_notice.notify(h.config(), "alice", entry, outputs, h.now + 540, lambda: None)
+    assert len(delivered["good"]) == 2 and len(delivered["retry"]) == 3
+    assert "accounting_notice" not in entry

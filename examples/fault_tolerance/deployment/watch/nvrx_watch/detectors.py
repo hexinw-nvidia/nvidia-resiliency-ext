@@ -219,7 +219,7 @@ def generation_churn(snapshot: Snapshot, config: Config) -> list[Finding]:
 # Restart anomalies -- platform independent
 # ---------------------------------------------------------------------------------
 def cycle_restart(snapshot: Snapshot, config: Config) -> list[Finding]:
-    """Report each NVRx cycle that starts after the watcher's initial observation.
+    """Report each NVRx restart cycle (1 onward) after the initial observation.
 
     Cycle-info files are durable, so the previous latest-cycle key is a cursor.  Walking
     forward from it reports every restart even when multiple cycles begin between watcher
@@ -270,6 +270,7 @@ def cycle_restart(snapshot: Snapshot, config: Config) -> list[Finding]:
             ),
         )
         for cycle in new_cycles
+        if cycle.cycle_number > 0
     ]
 
 

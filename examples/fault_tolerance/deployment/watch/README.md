@@ -18,10 +18,14 @@ reasoning behind the thresholds.
 
 Set `event_queue_dir` (an absolute private path) and `cluster` in the JSON config,
 or use `--event-queue-dir` / `--cluster`. This opt-in writes durable events for new
-cycles, array/attempt transitions, and observed task-0 failures. The first pass
+restart cycles (cycle 1 onward) and observed task-0 failures. The first pass
 establishes a baseline; historical restarts are not replayed. It adds no scheduler
 queries and runs no analysis on the login node. Existing restart alerts continue
-independently of event delivery.
+independently of event delivery. Cycle 0 is initial startup and does not trigger a
+restart alert or automatic recovery analysis, including across job/attempt changes.
+A job-ID change alone does not prove recovery from a failure. Restart events pair
+only with the preceding cycle in the same job and attempt; missing predecessor
+records remain missing instead of borrowing another job's logs.
 
 The consumer can retrieve a bounded batch over SSH from this directory:
 
@@ -192,12 +196,23 @@ This notification adds no Slurm queries and is suppressed by `--dry-run`.
   there is no per-chain subprocess fan-out. The registry records the next query time
   before contacting Slurm, so an interrupted pass does not reset the budget.
 - When known arrays lose task 0 or leave the queue, at most **one batched `sacct`** is
-  issued for the selected user, with up to 128 task-0 IDs. Terminal results are cached.
+  issued for the selected user, covering at most 128 known arrays. Arrays still in
+  the queue use task-0 queries; vanished arrays use parent IDs so Slurm can return
+  compact cancellation records such as `123_[0-200%26]`. Only explicit task 0 or a
+  valid compact range containing 0 supplies its terminal state. Terminal results
+  are cached.
   Accounting covers arrays discovered by this watcher, not arbitrary historical jobs.
 - Query failures back off exponentially (up to 16 times the configured interval).
   An unavailable queue is not an empty queue. Failed or expired snapshots skip
   scheduler-dependent detectors while file-based checks continue; no healthy heartbeat
   is emitted. Queue snapshots expire after twice the discovery interval.
+- Accounting gaps degrade only the affected chains; they do not make unrelated
+  jobs under the same user appear blind. Cycle-file monitoring continues.
+  Discovery owns one accounting incident per user: warn after two actual incomplete
+  accounting checks, remind at most every six hours (or a longer configured alert
+  cooldown), and send one recovery notice after resolution. Per-chain accounting
+  details stay in local logs. Successful notification sinks are not repeated while
+  other sinks retry. Grace suppresses paging, not degraded status or heartbeat safety.
 - Chains are identified by owner, job name, and resolved runtime paths within this
   cluster's registry. Successor arrays join the same chain without resolving an old
   seed job. Different owners or runtime paths have separate state and alert cooldowns.
