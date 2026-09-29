@@ -340,7 +340,24 @@ channel/timestamp under `slack-receipts/`, and retries failures from
 `slack-pending/`. It attempts at most one parent per pass (15-second HTTP timeout),
 honors Slack Retry-After, and adds no scheduler queries. Existing cycle webhook
 posts are suppressed only when a durable threaded parent intent exists. Other
-findings and discovery notifications retain their existing sinks.
+findings retain their existing sinks. With bot delivery enabled, each newly
+observed active array gets a startup parent through the same durable outbox;
+startup does not enqueue diagnosis or validation. Previously delivered discovery
+notifications are not replayed during upgrade.
+
+Each new parent is immediately followed by a **Cycle logs** reply in its thread:
+the initial cycle for startup, or the previous and new cycles for a restart.
+The shared directory appears once, with exact filenames in separate copyable
+code blocks. There are no hyperlinks or paths in the parent/analysis summary.
+Paths come from the exact job/attempt/cycle's `cycle_info` record, with no log
+content scans or additional Slurm queries. If a file is not available yet, the
+reply says so and subsequent cron passes update that same Slack message.
+Keep `slack-log-pending/` and `slack-log-receipts/` alongside parent receipts;
+these prevent repeat posts and preserve the message ID for updates. The watcher
+attempts at most one log-reply post/update per pass, spaces it after a new parent,
+and respects Slack rate limits. Already-completed historical threads are not
+backfilled. A lost Slack response before a receipt is saved can still duplicate
+a post, as with parent delivery.
 
 The local runner must use the same `slack_channel_id` and an incoming webhook
 bound to that channel. It retrieves receipts using

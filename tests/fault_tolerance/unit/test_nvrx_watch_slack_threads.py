@@ -14,13 +14,20 @@ import pytest
 sys.path.insert(
     0, str(Path(__file__).resolve().parents[3] / "examples/fault_tolerance/deployment/watch")
 )
-from nvrx_watch import events, runner, slack_threads, types
+from nvrx_watch import cycle_logs, events, runner, slack_threads, types
 from nvrx_watch.config import Config
 
 from . import test_nvrx_watch_events as event_fixtures
 
 cycle = event_fixtures.cycle
 setup = event_fixtures.setup
+
+
+@pytest.fixture(autouse=True)
+def isolate_parent_delivery(monkeypatch):
+    # Reply delivery is exercised with real outboxes in test_nvrx_watch_cycle_logs.
+    monkeypatch.setattr(cycle_logs, "flush", lambda *a, **kw: True)
+    monkeypatch.setattr(slack_threads.time, "sleep", lambda seconds: None)
 
 
 def enable(config, tmp_path):

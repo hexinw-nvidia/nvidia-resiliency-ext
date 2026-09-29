@@ -19,6 +19,9 @@ def notify(config, key, chain, snapshot, sink_list, save):
         )
         return
 
+    if config.slack_bot_token_file:
+        return _notify_threaded(config, key, chain, snapshot, sink_list, save)
+
     notice = chain.get("discovery_notice")
     if notice is None:
         running = next(
@@ -54,3 +57,40 @@ def notify(config, key, chain, snapshot, sink_list, save):
             notice["sent"].append(sink.name)
             # Save each successful sink separately; failed sinks retry on the next pass.
             save()
+
+
+def _notify_threaded(config, key, chain, snapshot, sink_list, save):
+    """Give each newly observed active array its own parent and cycle-log reply."""
+    from .cycle_logs import enqueue_start
+
+    notices = chain.setdefault("discovery_notices", {})
+    legacy = chain.get("discovery_notice", {})
+    for generation in snapshot.generations:
+        if not any(t.is_live and t.state != "PENDING" for t in generation.tasks):
+            continue
+        job = generation.gen_id
+        if job not in notices:
+            notices[job] = {
+                "job_id": job,
+                "observed_at": snapshot.observed_at.isoformat(),
+                "sent": list(legacy.get("sent", [])) if legacy.get("job_id") == job else [],
+            }
+            save()
+    for notice in notices.values():
+        finding = Finding(
+            key=f"nvrx-discovered-{key}-{notice['job_id']}",
+            detector="injob_discovered",
+            severity=INFO,
+            summary=f"InJob started; monitoring active for Slurm job array {notice['job_id']}.",
+        )
+        # Slack delivery has its own durable outbox; no webhook duplicate.
+        if "webhook" not in notice["sent"]:
+            enqueue_start(config, key, chain, snapshot, notice)
+            notice["sent"].append("webhook")
+            save()
+        for sink in sink_list:
+            if sink.name in notice["sent"]:
+                continue
+            if sink.emit(finding):
+                notice["sent"].append(sink.name)
+                save()

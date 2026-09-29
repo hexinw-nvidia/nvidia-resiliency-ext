@@ -49,17 +49,37 @@ class RetryLater(Exception):
         self.seconds = max(60, min(float(seconds), 86400))
 
 
-def post_parent(config, event):
+def api_call(config, method, payload):
     path = Path(config.slack_bot_token_file)
     if stat.S_IMODE(path.stat().st_mode) not in (0o400, 0o600):
         raise ValueError("Slack token file must have mode 400 or 600")
     token = path.read_text().strip()
     if not token.startswith("xoxb-") or any(c.isspace() for c in token):
         raise ValueError("expected a Slack bot token")
+    request = urllib.request.Request(
+        "https://slack.com/api/" + method,
+        data=json.dumps(payload).encode(),
+        headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            value = json.load(response)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            raise RetryLater(exc.headers.get("Retry-After", "180")) from None
+        raise RuntimeError("Slack delivery failed") from None
+    # Slack can return HTTP 200 with ok=false. Never log the request or token.
+    if not value.get("ok"):
+        raise RuntimeError("Slack request rejected")
+    return value
+
+
+def post_parent(config, event):
     cycle = event.get("cycle") or {}
     terminal = event.get("scheduler", {}).get("terminal") or {}
     job = cycle.get("job_id") or terminal.get("job_id", "unknown")
     description = {
+        "job_started": "InJob started; monitoring active",
         "cycle_restart": "NVRx restart cycle started",
         "generation_transition": "NVRx job/attempt transition observed",
         "terminal_failure": "NVRx terminal failure observed",
@@ -72,29 +92,19 @@ def post_parent(config, event):
         text += f", attempt {cycle['attempt_index']}, cycle {cycle['cycle_number']}"
     if terminal:
         text += f": {terminal['state']}"
-    text += ".\nDiagnosis and validation will follow in this thread."
-    request = urllib.request.Request(
-        "https://slack.com/api/chat.postMessage",
-        data=json.dumps(
-            {
-                "channel": config.slack_channel_id,
-                "text": text,
-                "unfurl_links": False,
-                "unfurl_media": False,
-            }
-        ).encode(),
-        headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
+    text += "."
+    if event["kind"] != "job_started":
+        text += "\nDiagnosis and validation will follow in this thread."
+    value = api_call(
+        config,
+        "chat.postMessage",
+        {
+            "channel": config.slack_channel_id,
+            "text": text,
+            "unfurl_links": False,
+            "unfurl_media": False,
+        },
     )
-    try:
-        with urllib.request.urlopen(request, timeout=15) as response:
-            value = json.load(response)
-    except urllib.error.HTTPError as exc:
-        if exc.code == 429:
-            raise RetryLater(exc.headers.get("Retry-After", "180")) from None
-        raise RuntimeError("Slack parent delivery failed") from None
-    # Slack can return HTTP 200 with ok=false. Never log the request or token.
-    if not value.get("ok"):
-        raise RuntimeError("Slack parent rejected")
     if value.get("channel") != config.slack_channel_id or not re.fullmatch(
         r"[0-9]+\.[0-9]+", str(value.get("ts", ""))
     ):
@@ -103,9 +113,9 @@ def post_parent(config, event):
 
 
 def flush(config):
-    """Try one parent per watcher pass, keeping failed delivery independent of analysis.
+    """Try one parent and its cycle-log reply, independently of analysis.
 
-    One request bounds login-node latency and respects Slack's channel rate limit.
+    Requests are bounded; the immediate reply waits for the channel rate limit.
     Receipts survive event acknowledgement and chain retirement. A lost HTTP reply
     can still duplicate a parent; Slack posting is not an exactly-once transaction.
     """
@@ -113,8 +123,10 @@ def flush(config):
         return True
     queue = Path(config.event_queue_dir)
     pending = queue / "slack-pending"
+    from . import cycle_logs
+
     if not pending.exists():
-        return True
+        return cycle_logs.flush(config)
     try:
         now = time.time()
         throttle = queue / "slack-retry-after.json"
@@ -130,6 +142,7 @@ def flush(config):
                 path = Path(entry.path)
                 receipt = queue / "slack-receipts" / entry.name
                 if receipt.exists():
+                    cycle_logs.enqueue(config, json.loads(path.read_text()))
                     path.unlink()
                     continue
                 event = json.loads(path.read_text())
@@ -151,9 +164,11 @@ def flush(config):
                 atomic_json(path, event)
                 return False
             atomic_json(receipt, value)
+            cycle_logs.enqueue(config, event)
             path.unlink()
-            return True
-        return True
+            time.sleep(1.1)
+            return cycle_logs.flush(config, event["event_id"])
+        return cycle_logs.flush(config)
     except Exception as exc:
         LOG.warning("Slack parent delivery pending (%s)", type(exc).__name__)
         return False
