@@ -345,19 +345,16 @@ observed active array gets a startup parent through the same durable outbox;
 startup does not enqueue diagnosis or validation. Previously delivered discovery
 notifications are not replayed during upgrade.
 
-Each new parent is immediately followed by a **Cycle logs** reply in its thread:
-the initial cycle for startup, or the previous and new cycles for a restart.
-The shared directory appears once, with exact filenames in separate copyable
-code blocks. There are no hyperlinks or paths in the parent/analysis summary.
-Paths come from the exact job/attempt/cycle's `cycle_info` record, with no log
-content scans or additional Slurm queries. If a file is not available yet, the
-reply says so and subsequent cron passes update that same Slack message.
+Each new parent includes only the current cycle's full log path in a copyable
+code block, separated from the alert text by a blank line. No separate log reply
+or previous-cycle path is posted. Diagnosis and validation still reply in the
+same thread. Paths come from the exact job/attempt/cycle's `cycle_info` record,
+with no log content scans or additional Slurm queries. If a file is not available
+yet, the parent says so and subsequent cron passes update that same Slack message.
 Keep `slack-log-pending/` and `slack-log-receipts/` alongside parent receipts;
-these prevent repeat posts and preserve the message ID for updates. The watcher
-attempts at most one log-reply post/update per pass, spaces it after a new parent,
-and respects Slack rate limits. Already-completed historical threads are not
-backfilled. A lost Slack response before a receipt is saved can still duplicate
-a post, as with parent delivery.
+these prevent repeat updates. The watcher attempts at most one log-path update
+per pass and respects Slack rate limits. Legacy pending replies are redirected to
+parent updates; already-completed historical threads are not changed.
 
 The local runner must use the same `slack_channel_id` and an incoming webhook
 bound to that channel. It retrieves receipts using

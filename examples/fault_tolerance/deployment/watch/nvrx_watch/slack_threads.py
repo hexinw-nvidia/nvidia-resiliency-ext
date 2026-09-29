@@ -74,7 +74,9 @@ def api_call(config, method, payload):
     return value
 
 
-def post_parent(config, event):
+def render_parent(event):
+    from . import cycle_logs
+
     cycle = event.get("cycle") or {}
     terminal = event.get("scheduler", {}).get("terminal") or {}
     job = cycle.get("job_id") or terminal.get("job_id", "unknown")
@@ -95,6 +97,12 @@ def post_parent(config, event):
     text += "."
     if event["kind"] != "job_started":
         text += "\nDiagnosis and validation will follow in this thread."
+    log_text, complete = cycle_logs.render(event)
+    return text + "\n\n" + log_text, complete
+
+
+def post_parent(config, event):
+    text, complete = render_parent(event)
     value = api_call(
         config,
         "chat.postMessage",
@@ -109,13 +117,19 @@ def post_parent(config, event):
         r"[0-9]+\.[0-9]+", str(value.get("ts", ""))
     ):
         raise ValueError("invalid Slack parent receipt")
-    return {"event_id": event["event_id"], "channel": value["channel"], "thread_ts": value["ts"]}
+    return {
+        "event_id": event["event_id"],
+        "channel": value["channel"],
+        "thread_ts": value["ts"],
+        "text": text,
+        "log_complete": complete,
+    }
 
 
 def flush(config):
-    """Try one parent and its cycle-log reply, independently of analysis.
+    """Try one parent and one pending log-path update, independently of analysis.
 
-    Requests are bounded; the immediate reply waits for the channel rate limit.
+    Requests are bounded; updates preserve the parent message and its thread.
     Receipts survive event acknowledgement and chain retirement. A lost HTTP reply
     can still duplicate a parent; Slack posting is not an exactly-once transaction.
     """
@@ -166,7 +180,6 @@ def flush(config):
             atomic_json(receipt, value)
             cycle_logs.enqueue(config, event)
             path.unlink()
-            time.sleep(1.1)
             return cycle_logs.flush(config, event["event_id"])
         return cycle_logs.flush(config)
     except Exception as exc:

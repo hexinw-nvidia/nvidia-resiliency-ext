@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""One durable, editable cycle-log reply per Slack alert. No log content or Slurm reads."""
+"""Current cycle log in each Slack parent. No log content or Slurm reads."""
 
 import glob
 import hashlib
@@ -8,7 +8,6 @@ import json
 import logging
 import re
 import time
-from collections import OrderedDict
 from itertools import islice
 from pathlib import Path
 
@@ -47,27 +46,20 @@ def enqueue_start(config, key, chain, snapshot, notice):
 def enqueue(config, event):
     queue = Path(config.event_queue_dir)
     name = event["event_id"] + ".json"
-    if (
-        not (queue / "slack-log-receipts" / name).exists()
-        and not (queue / "slack-log-pending" / name).exists()
-    ):
-        atomic_json(queue / "slack-log-pending" / name, {"event": event})
-
-
-def _cycles(event):
-    current = event.get("cycle")
-    previous = event.get("previous_cycle")
-    if event["kind"] == "cycle_restart" and current:
-        # Pin the preceding cycle in this attempt; never substitute another run.
-        if previous is None and current["cycle_number"] > 0:
-            previous = {
-                **current,
-                "cycle_number": current["cycle_number"] - 1,
-                "log_file": "",
-                "path": "",
-            }
-        return [("Previous", previous), ("New", current)]
-    return [("", current or previous)]
+    if (queue / "slack-log-receipts" / name).exists() or (
+        queue / "slack-log-pending" / name
+    ).exists():
+        return
+    parent_file = queue / "slack-receipts" / name
+    parent = json.loads(parent_file.read_text()) if parent_file.exists() else {}
+    state = {
+        "event": event,
+        "text": parent.get("text"),
+        "ts": parent.get("thread_ts"),
+        "target": "parent",
+    }
+    folder = "slack-log-receipts" if parent.get("log_complete") else "slack-log-pending"
+    atomic_json(queue / folder / name, state)
 
 
 def _log_path(event, cycle):
@@ -108,36 +100,20 @@ def render(event):
     cluster = event.get("cluster") or "cluster"
     if cluster.lower() in {"cmh", "aga", "hsg"}:
         cluster = cluster.upper()
-    lines = [f"*Cycle logs · {escape(cluster)}*"]
-    groups = OrderedDict()
-    missing = []
-    for role, cycle in _cycles(event):
-        if not cycle:
-            missing.append("Cycle log: not available yet.")
-            continue
-        label = f"{role} cycle {cycle['cycle_number']}".strip()
-        if not role:
-            label = label.capitalize()
-        if cycle["attempt_index"]:
-            label += f" (attempt {cycle['attempt_index']})"
-        path = _log_path(event, cycle)
-        if path:
-            p = Path(path)
-            groups.setdefault(str(p.parent), []).append((label, p.name))
-        else:
-            missing.append(f"{label}: log not available yet.")
-    for directory, files in groups.items():
-        lines.extend(["", "Directory:", f"```{escape(directory)}/```"])
-        for label, name in files:
-            lines.extend([f"{label}:", f"```{escape(name)}```"])
-    if missing:
-        lines.extend(["", *missing])
-    return "\n".join(lines), not missing
+    cycle = event.get("cycle") or event.get("previous_cycle")
+    label = f"Cycle {cycle['cycle_number']} log" if cycle else "Cycle log"
+    if cycle and cycle["attempt_index"]:
+        label += f" (attempt {cycle['attempt_index']})"
+    heading = f"*{label} · {escape(cluster)}*"
+    path = _log_path(event, cycle)
+    if not path:
+        return heading + "\nLog not available yet.", False
+    return heading + f"\n```\n{escape(path)}\n```", True
 
 
 def flush(config, preferred=None):
-    """Post/update at most one reply; retry missing paths on subsequent cron passes."""
-    from .slack_threads import RetryLater, api_call
+    """Update at most one parent; retry missing paths on subsequent cron passes."""
+    from .slack_threads import RetryLater, api_call, render_parent
 
     if config.dry_run or not config.slack_bot_token_file:
         return True
@@ -166,11 +142,11 @@ def flush(config, preferred=None):
             if parent.get("channel") != config.slack_channel_id or not re.fullmatch(
                 r"[0-9]+\.[0-9]+", str(parent.get("thread_ts", ""))
             ):
-                raise ValueError("invalid parent for cycle-log reply")
-            text, complete = render(state["event"])
+                raise ValueError("invalid parent for cycle-log update")
+            text, complete = render_parent(state["event"])
             state["retry_at"] = now + 180
             atomic_json(path, state)
-            if text == state.get("text"):
+            if state.get("target") == "parent" and text == state.get("text"):
                 continue
             payload = {
                 "channel": parent["channel"],
@@ -178,14 +154,9 @@ def flush(config, preferred=None):
                 "unfurl_links": False,
                 "unfurl_media": False,
             }
-            if state.get("ts"):
-                payload["ts"] = state["ts"]
-                method = "chat.update"
-            else:
-                payload["thread_ts"] = parent["thread_ts"]
-                method = "chat.postMessage"
+            payload["ts"] = parent["thread_ts"]
             try:
-                value = api_call(config, method, payload)
+                value = api_call(config, "chat.update", payload)
             except RetryLater as exc:
                 state["retry_at"] = now + exc.seconds
                 atomic_json(path, state)
@@ -194,10 +165,16 @@ def flush(config, preferred=None):
             if value.get("channel") != parent["channel"] or not re.fullmatch(
                 r"[0-9]+\.[0-9]+", str(value.get("ts", ""))
             ):
-                raise ValueError("invalid cycle-log reply receipt")
-            if state.get("ts") and value["ts"] != state["ts"]:
-                raise ValueError("cycle-log update changed message identity")
-            state.update(ts=value["ts"], text=text, channel=parent["channel"], complete=complete)
+                raise ValueError("invalid cycle-log update receipt")
+            if value["ts"] != parent["thread_ts"]:
+                raise ValueError("cycle-log update changed parent identity")
+            state.update(
+                ts=value["ts"],
+                text=text,
+                channel=parent["channel"],
+                complete=complete,
+                target="parent",
+            )
             atomic_json(path, state)
             if complete:
                 atomic_json(done, state)
@@ -205,5 +182,5 @@ def flush(config, preferred=None):
             return True
         return True
     except Exception as exc:
-        LOG.warning("Cycle-log reply pending (%s)", type(exc).__name__)
+        LOG.warning("Cycle-log update pending (%s)", type(exc).__name__)
         return False

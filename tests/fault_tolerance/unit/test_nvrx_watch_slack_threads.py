@@ -25,7 +25,7 @@ setup = event_fixtures.setup
 
 @pytest.fixture(autouse=True)
 def isolate_parent_delivery(monkeypatch):
-    # Reply delivery is exercised with real outboxes in test_nvrx_watch_cycle_logs.
+    # Parent updates are exercised with real outboxes in test_nvrx_watch_cycle_logs.
     monkeypatch.setattr(cycle_logs, "flush", lambda *a, **kw: True)
     monkeypatch.setattr(slack_threads.time, "sleep", lambda seconds: None)
 
@@ -155,7 +155,9 @@ def test_slack_success_and_private_token_permissions(setup, tmp_path, monkeypatc
         return io.BytesIO(b'{"ok":true,"channel":"C123","ts":"123.456"}')
 
     monkeypatch.setattr(slack_threads.urllib.request, "urlopen", success)
-    assert slack_threads.post_parent(config, ev) == accepted(config, ev)
+    receipt = slack_threads.post_parent(config, ev)
+    assert {k: receipt[k] for k in accepted(config, ev)} == accepted(config, ev)
+    assert "Cycle 1 log" in receipt["text"]
     Path(config.slack_bot_token_file).chmod(0o644)
     with pytest.raises(ValueError):
         slack_threads.post_parent(config, ev)
