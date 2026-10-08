@@ -117,6 +117,17 @@ def _parse_exit_code(value: str) -> int | None:
         return None
 
 
+def accounting_details(state: str, exit_code: str) -> dict:
+    """Retain attribution evidence without changing detector state/code semantics."""
+    match = re.search(r"\bCANCELLED by (\d+)\b", state)
+    signal_part = exit_code.strip().partition(":")[2]
+    return dict(
+        raw_state=state.strip(), raw_exit_code=exit_code.strip(),
+        exit_signal=int(signal_part) if signal_part.isdigit() else None,
+        cancelled_by_uid=int(match[1]) if match else None,
+    )
+
+
 class SlurmPlatform:
     """Slurm implementation, via squeue and sacct.
 
@@ -230,7 +241,7 @@ class SlurmPlatform:
 
     def terminal_info(self, gen_id: str, task: int) -> TaskInfo | None:
         out = self._run(
-            ["sacct", "-j", f"{gen_id}_{task}", "-X", "-n", "-P", "-o", "State,End,ExitCode"]
+            ["sacct", "-j", f"{gen_id}_{task}", "-X", "-n", "-P", "-o", "State%80,End,ExitCode"]
         )
         line = next((line for line in reversed(out.splitlines()) if line.strip()), "")
         if not line:
@@ -242,7 +253,8 @@ class SlurmPlatform:
             return None
         end = _parse_slurm_time(parts[1]) if len(parts) > 1 else None
         code = _parse_exit_code(parts[2]) if len(parts) > 2 else None
-        return TaskInfo(task=task, state=state, exit_code=code, end_time=end)
+        return TaskInfo(task=task, state=state, exit_code=code, end_time=end,
+                        **accounting_details(parts[0], parts[2] if len(parts) > 2 else ""))
 
     def cancel_pending(self, gen_id: str) -> bool:
         try:
@@ -254,7 +266,7 @@ class SlurmPlatform:
     def recent_endings(self, job_name: str, since_seconds: float) -> list[tuple[str, TaskInfo]]:
         starttime = f"now-{int(since_seconds)}seconds"
         argv = ["sacct", "-n", "-P", "-X", "--name", job_name, "-S", starttime]
-        argv += [*self._user_args(), "-o", "JobID,State,End,ExitCode"]
+        argv += [*self._user_args(), "-o", "JobID,State%80,End,ExitCode"]
         out = self._run(argv)
         endings: dict[str, TaskInfo] = {}
         for line in out.splitlines():
@@ -278,7 +290,8 @@ class SlurmPlatform:
             end = _parse_slurm_time(end_raw)
             if end is not None:
                 endings[array_job] = TaskInfo(
-                    task=0, state=state, exit_code=_parse_exit_code(code_raw), end_time=end
+                    task=0, state=state, exit_code=_parse_exit_code(code_raw), end_time=end,
+                    **accounting_details(state_raw, code_raw)
                 )
         return sorted(endings.items(), key=lambda item: item[1].end_time or _EPOCH)
 

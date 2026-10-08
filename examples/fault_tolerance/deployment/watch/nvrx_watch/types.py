@@ -56,6 +56,10 @@ class TaskInfo:
     state: str
     exit_code: int | None = None
     end_time: datetime | None = None
+    raw_state: str = ""
+    raw_exit_code: str = ""
+    exit_signal: int | None = None
+    cancelled_by_uid: int | None = None
 
     @property
     def is_live(self) -> bool:

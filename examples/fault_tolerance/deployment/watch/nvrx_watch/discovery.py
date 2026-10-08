@@ -38,7 +38,7 @@ from pathlib import Path
 
 from . import accounting_notice, discovery_notice, parsing, runner, sinks
 from .config import Config
-from .platform import NullPlatform, PlatformError, SlurmPlatform, _parse_slurm_time
+from .platform import NullPlatform, PlatformError, SlurmPlatform, _parse_slurm_time, accounting_details
 from .types import WARNING, ChainGeneration, Finding, TaskInfo
 
 logger = logging.getLogger("nvrx_watch")
@@ -341,7 +341,7 @@ def _accounting(config, registry, user, platform, now):
                 # vanished arrays, request the parent and accept a compact row.
                 ",".join(f"{jid}_0" if jid in entry["arrays"] else jid for jid in selected),
                 "-o",
-                "JobID%128,State,End,ExitCode",
+                "JobID%128,State%80,End,ExitCode",
             ]
         )
         for line in output.splitlines():
@@ -358,7 +358,8 @@ def _accounting(config, registry, user, platform, now):
             state = parts[1].strip().split()[0] if parts[1].strip() else ""
             end = _parse_slurm_time(parts[2])
             if state and not TaskInfo(0, state).is_live and end:
-                terminal[jid] = dict(state=state, end=end.isoformat(), code=parts[3].split(":")[0])
+                terminal[jid] = dict(state=state, end=end.isoformat(), code=parts[3].split(":")[0],
+                                     raw_state=parts[1].strip(), raw_exit_code=parts[3].strip())
         missing = wanted - set(terminal)
         entry["accounting_missing"] = sorted(missing, key=int)
         entry["accounting_error"] = (
@@ -405,6 +406,7 @@ class CachedPlatform(NullPlatform):
             raw["state"],
             int(raw["code"]) if raw["code"].isdigit() else None,
             datetime.fromisoformat(raw["end"]),
+            **accounting_details(raw.get("raw_state", raw["state"]), raw.get("raw_exit_code", raw["code"])),
         )
 
     @property

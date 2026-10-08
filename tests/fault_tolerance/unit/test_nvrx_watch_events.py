@@ -230,3 +230,16 @@ def test_retirement_waits_for_delayed_terminal_event(tmp_path, monkeypatch):
     assert not registry["chains"]
     pending = events.export(Path(cfg.event_queue_dir), 20)
     assert len(pending) == 1 and pending[0]["kind"] == "terminal_failure"
+
+
+def test_discovery_cache_preserves_shutdown_evidence_and_older_caches():
+    raw = {"state": "CANCELLED", "code": "0", "end": NOW.isoformat(),
+           "raw_state": "CANCELLED by 1234", "raw_exit_code": "0:15"}
+    platform = discovery.CachedPlatform({"terminal": {"100": raw}}, {}, NOW.timestamp(), 600)
+    task = platform.terminal_info("100", 0)
+    assert task.cancelled_by_uid == 1234 and task.exit_signal == 15
+    del raw["raw_state"]
+    del raw["raw_exit_code"]
+    task = platform.terminal_info("100", 0)
+    assert task.state == "CANCELLED" and task.cancelled_by_uid is None
+    assert task.exit_signal is None

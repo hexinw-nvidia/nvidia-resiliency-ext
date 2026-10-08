@@ -708,6 +708,18 @@ class TestState:
 
 
 class TestSlurmParsing:
+    def test_cancellation_credentials_and_signal_survive(self, monkeypatch):
+        platform = SlurmPlatform()
+        def run(argv):
+            assert "State%80,End,ExitCode" in argv[-1]
+            return "CANCELLED by 1234|2026-10-08T11:00:00|0:15\n"
+        monkeypatch.setattr(platform, "_run", run)
+        info = platform.terminal_info("100", 0)
+        assert info.state == "CANCELLED" and info.exit_code == 0
+        assert info.raw_state == "CANCELLED by 1234"
+        assert info.cancelled_by_uid == 1234 and info.exit_signal == 15
+        assert info.raw_exit_code == "0:15"
+
     def test_squeue_grouping_uses_the_array_job_id(self, monkeypatch):
         platform = SlurmPlatform()
         monkeypatch.setattr(
