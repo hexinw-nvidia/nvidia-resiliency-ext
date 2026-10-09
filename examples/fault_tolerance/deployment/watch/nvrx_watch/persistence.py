@@ -27,10 +27,11 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from dataclasses import asdict
 from datetime import datetime
 
 from .parsing import parse_iso
-from .types import CheckpointProgress, CycleRecord, PriorState, utcnow
+from .types import CheckpointProgress, CycleRecord, PriorState, TrainingProgress, utcnow
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -49,7 +50,16 @@ def load(path: str) -> tuple[PriorState, dict[str, datetime]]:
 
     checkpoint = data.get("checkpoint_iteration") or {}
     cycle = data.get("latest_cycle") or {}
+    training = data.get("training") or {}
+    try:
+        training = dict(training)
+        for key in ("advanced_at", "save_started_at", "checkpoint_due_at"):
+            training[key] = parse_iso(training.get(key))
+        training = TrainingProgress(**training)
+    except (TypeError, ValueError):
+        training = TrainingProgress()
     prior = PriorState(
+        training=training,
         checkpoint_value=checkpoint.get("value"),
         checkpoint_first_seen=parse_iso(checkpoint.get("first_seen")),
         latest_cycle_key=cycle.get("key"),
@@ -69,6 +79,7 @@ def advance(
     checkpoint: CheckpointProgress,
     latest_cycle: CycleRecord | None,
     now: datetime | None = None,
+    training: TrainingProgress | None = None,
 ) -> PriorState:
     """Carry first-seen timestamps forward, resetting them when the value changes."""
     now = now or utcnow()
@@ -92,12 +103,17 @@ def advance(
         latest_cycle_key=cycle_key,
         latest_cycle_first_seen=cycle_first_seen,
         last_pass=now,
+        training=training if training is not None else prior.training,
     )
 
 
 def save(path: str, prior: PriorState, alerts: dict[str, datetime]) -> None:
     """Write state atomically; a torn state file would be read as 'no history'."""
+    training = asdict(prior.training)
+    for key in ("advanced_at", "save_started_at", "checkpoint_due_at"):
+        training[key] = _iso(training[key])
     payload = {
+        "training": training,
         "last_pass": _iso(prior.last_pass),
         "checkpoint_iteration": {
             "value": prior.checkpoint_value,

@@ -131,6 +131,29 @@ class CheckpointProgress:
 
 
 @dataclass(frozen=True)
+class TrainingProgress:
+    """Cycle-scoped application progress and bounded log-reader cursor."""
+
+    cycle_key: str = ""
+    path: str = ""
+    identity: str = ""
+    offset: int = 0
+    available: bool = False
+    reason: str = "no recognized iteration evidence"
+    iteration: int | None = None
+    completed: int | None = None  # iteration minus cumulative skipped iterations
+    advanced_at: datetime | None = None
+    loaded_iteration: int | None = None
+    save_interval: int | None = None
+    step_seconds: float | None = None
+    save_started_at: datetime | None = None
+    save_iteration: int | None = None
+    save_seconds: float | None = None
+    checkpoint_due_iteration: int | None = None
+    checkpoint_due_at: datetime | None = None
+
+
+@dataclass(frozen=True)
 class PriorState:
     """What the previous pass saw. Turns a point-in-time snapshot into a stall timer."""
 
@@ -139,6 +162,7 @@ class PriorState:
     latest_cycle_key: str | None = None
     latest_cycle_first_seen: datetime | None = None
     last_pass: datetime | None = None
+    training: TrainingProgress = TrainingProgress()
 
 
 @dataclass(frozen=True)
@@ -171,6 +195,7 @@ class Snapshot:
     cycles: tuple[CycleRecord, ...] = ()
     checkpoint: CheckpointProgress = CheckpointProgress()
     prior: PriorState = PriorState()
+    training: TrainingProgress = TrainingProgress()
     chain_expected: bool = False
     max_restarts: int | None = None
     # Filled by the platform source on demand: (gen_id, task) -> TaskInfo from sacct.

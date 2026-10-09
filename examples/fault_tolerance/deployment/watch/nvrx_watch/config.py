@@ -68,6 +68,10 @@ class Config:
     storm_window: float = 30 * 60.0
     stall_cycles: int = 3  # completed cycles with no checkpoint movement
     stall_seconds: float = 3600.0  # open cycle with nothing moving
+    progress_read_bytes: int = 2 * 1024 * 1024  # per pass; bootstrap also reads a header
+    progress_header_bytes: int = 512 * 1024
+    application_log_timezone: str = ""  # empty uses the watcher's local timezone
+    checkpoint_grace_seconds: float = 600.0  # minimum grace after a save becomes due
     short_cycle_seconds: float = 600.0
     suspect_cycles: int = 3
     budget_fraction: float = 0.8
@@ -88,6 +92,14 @@ class Config:
     disable: tuple[str, ...] = ()  # detector names to skip
 
     def __post_init__(self) -> None:
+        if self.progress_read_bytes < 1024 or self.progress_header_bytes < 1024:
+            raise ValueError("progress read budgets must be at least 1024 bytes")
+        if self.checkpoint_grace_seconds <= 0:
+            raise ValueError("checkpoint_grace_seconds must be positive")
+        if self.application_log_timezone:
+            from zoneinfo import ZoneInfo
+
+            ZoneInfo(self.application_log_timezone)
         if self.event_queue_dir and not os.path.isabs(self.event_queue_dir):
             raise ValueError("event_queue_dir must be an absolute private path")
         if bool(self.slack_bot_token_file) != bool(self.slack_channel_id):

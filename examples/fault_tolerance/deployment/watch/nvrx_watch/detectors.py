@@ -371,11 +371,9 @@ def stalled_progress(snapshot: Snapshot, config: Config) -> list[Finding]:
 
 
 def cycle_stalled(snapshot: Snapshot, config: Config) -> list[Finding]:
-    """The current cycle is open and nothing has moved for a long time.
+    """Require recognized training evidence before declaring a critical stall.
 
-    The complement of stalled_progress: nothing is restarting because nothing is
-    happening. Section timeouts should catch this, so firing means either a section's
-    timeout is too loose or the launcher itself is wedged.
+    Without iteration visibility, checkpoint silence is only an observation warning.
     """
     latest = snapshot.latest_cycle
     if latest is None or not latest.is_open or latest.start_time is None:
@@ -392,21 +390,92 @@ def cycle_stalled(snapshot: Snapshot, config: Config) -> list[Finding]:
         if owner is None or not owner.has_live_task:
             return []
     movements = [latest.start_time]
-    if snapshot.checkpoint.mtime is not None:
-        movements.append(snapshot.checkpoint.mtime)
+    checkpoint = snapshot.checkpoint
+    if checkpoint.value is not None:
+        # Rewriting an unchanged marker must not keep a frozen job looking alive.
+        checkpoint_time = (
+            snapshot.prior.checkpoint_first_seen
+            if checkpoint.value == snapshot.prior.checkpoint_value
+            else checkpoint.mtime
+        )
+        if checkpoint_time is not None:
+            movements.append(checkpoint_time)
+    training = snapshot.training
+    known = training.cycle_key == latest.key and training.available
+    if known and training.advanced_at is not None:
+        movements.append(training.advanced_at)
     idle = (snapshot.observed_at - max(movements)).total_seconds()
     if idle < config.stall_seconds:
         return []
+    if not known:
+        return [
+            Finding(
+                key=f"nvrx-progress-unavailable-{latest.key}",
+                detector="cycle_stalled",
+                severity=WARNING,
+                summary=(
+                    f"Training progress unavailable for cycle {latest.cycle_number} of "
+                    f"generation {latest.job_id}; no checkpoint advancement for {_fmt_age(idle)} "
+                    "(or since cycle start). A training stall is unconfirmed."
+                ),
+                detail=f"{training.reason}. Cycle log: {latest.log_file or 'unknown'}",
+            )
+        ]
     return [
         Finding(
             key=f"nvrx-cycle-stalled-{latest.key}",
             detector="cycle_stalled",
             severity=CRITICAL,
             summary=(
-                f"Cycle {latest.cycle_number} of generation {latest.job_id} has been open for "
-                f"{_fmt_age(idle)} with no checkpoint or cycle activity."
+                f"Cycle {latest.cycle_number} of generation {latest.job_id} has had no "
+                f"completed-iteration or checkpoint advancement for {_fmt_age(idle)} "
+                f"(last observed iteration {training.iteration})."
             ),
             detail=f"Cycle log: {latest.log_file or 'unknown'}",
+        )
+    ]
+
+
+def checkpoint_overdue(snapshot: Snapshot, config: Config) -> list[Finding]:
+    """Iteration advancement cannot conceal a missed or stuck checkpoint save."""
+    latest = snapshot.latest_cycle
+    if latest is None or not latest.is_open:
+        return []
+    if snapshot.has(CAP_PLATFORM):
+        owner = next((g for g in snapshot.generations if g.gen_id == latest.job_id), None)
+        if owner is None or not owner.has_live_task:
+            return []
+    training = snapshot.training
+    if (
+        training.cycle_key != latest.key
+        or not training.available
+        or training.checkpoint_due_at is None
+        or training.checkpoint_due_iteration is None
+    ):
+        return []
+    grace = max(
+        config.checkpoint_grace_seconds,
+        3 * (training.save_seconds or 0),
+        10 * (training.step_seconds or 0),
+    )
+    elapsed = (snapshot.observed_at - training.checkpoint_due_at).total_seconds()
+    if elapsed < grace:
+        return []
+    return [
+        Finding(
+            key=f"nvrx-checkpoint-overdue-{latest.key}-{training.checkpoint_due_iteration}",
+            detector="checkpoint_overdue",
+            severity=WARNING,
+            summary=(
+                f"Checkpoint {training.checkpoint_due_iteration} has been due for "
+                f"{_fmt_age(elapsed)} in generation {latest.job_id}; "
+                f"last checkpoint marker is {snapshot.checkpoint.value}, "
+                f"last observed training iteration is {training.iteration}."
+            ),
+            detail=(
+                f"Save interval: {training.save_interval} iterations; grace: {grace:.0f}s. "
+                "Check checkpoint persistence independently of training progress."
+            ),
         )
     ]
 
@@ -526,6 +595,7 @@ ALL: tuple[Detector, ...] = (
     Detector("restart_storm", (CAP_CYCLES,), restart_storm),
     Detector("stalled_progress", (CAP_CYCLES, CAP_CHECKPOINT), stalled_progress),
     Detector("cycle_stalled", (CAP_CYCLES,), cycle_stalled),
+    Detector("checkpoint_overdue", (CAP_CYCLES, CAP_CHECKPOINT), checkpoint_overdue),
     Detector("restart_budget_low", (CAP_CYCLES,), restart_budget_low),
     Detector("spares_exhausted", (CAP_CYCLES, CAP_PLATFORM), spares_exhausted),
     Detector("suspect_node", (CAP_CYCLES,), suspect_node),

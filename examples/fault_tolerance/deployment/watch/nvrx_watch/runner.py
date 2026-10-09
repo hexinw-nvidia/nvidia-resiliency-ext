@@ -19,9 +19,9 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
-from . import detectors, events, persistence, readers, sinks
+from . import detectors, events, persistence, progress, readers, sinks
 from .config import Config
 from .platform import Platform, PlatformError
 from .types import (
@@ -149,6 +149,7 @@ def gather(config: Config, platform: Platform) -> tuple[Snapshot, list[Finding]]
         terminal_info=terminal,
         recent_endings=endings,
     )
+    snapshot = replace(snapshot, training=progress.read(snapshot, config))
     return snapshot, findings
 
 
@@ -247,7 +248,11 @@ def run_once(config: Config, platform: Platform, sink_list: list | None = None) 
     if not config.dry_run and queued:
         prior, alerts = persistence.load(config.state_file)
         advanced = persistence.advance(
-            prior, snapshot.checkpoint, snapshot.latest_cycle, snapshot.observed_at
+            prior,
+            snapshot.checkpoint,
+            snapshot.latest_cycle,
+            snapshot.observed_at,
+            snapshot.training,
         )
         persistence.save(config.state_file, advanced, alerts)
 

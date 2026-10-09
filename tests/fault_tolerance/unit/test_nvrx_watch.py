@@ -559,7 +559,7 @@ class TestCycleStalled:
             checkpoint=types.CheckpointProgress(value=10, mtime=ago(hours=4)),
         )
         findings = detectors.cycle_stalled(snap, config)
-        assert len(findings) == 1 and findings[0].severity == types.CRITICAL
+        assert len(findings) == 1 and findings[0].severity == types.WARNING
 
     def test_recent_checkpoint_means_the_job_is_alive(self, config):
         snap = make_snapshot(
@@ -593,7 +593,7 @@ class TestCycleStalled:
             checkpoint=types.CheckpointProgress(value=10, mtime=ago(hours=4)),
         )
         findings = detectors.cycle_stalled(snap, config)
-        assert len(findings) == 1 and findings[0].severity == types.CRITICAL
+        assert len(findings) == 1 and findings[0].severity == types.WARNING
 
 
 class TestRestartBudget:
@@ -710,9 +710,11 @@ class TestState:
 class TestSlurmParsing:
     def test_cancellation_credentials_and_signal_survive(self, monkeypatch):
         platform = SlurmPlatform()
+
         def run(argv):
             assert "State%80,End,ExitCode" in argv[-1]
             return "CANCELLED by 1234|2026-10-08T11:00:00|0:15\n"
+
         monkeypatch.setattr(platform, "_run", run)
         info = platform.terminal_info("100", 0)
         assert info.state == "CANCELLED" and info.exit_code == 0

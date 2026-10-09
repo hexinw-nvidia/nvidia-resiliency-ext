@@ -296,7 +296,8 @@ out — the failure that otherwise costs a night with nothing in any log.
 | `cycle_restart` | A new NVRx restart cycle starts after the watcher baseline |
 | `restart_storm` | Too many NVRx cycles per window |
 | `stalled_progress` | Cycles complete but the checkpoint iteration does not move |
-| `cycle_stalled` | Current cycle open with no checkpoint or cycle activity |
+| `cycle_stalled` | No completed-iteration or checkpoint advancement; warning when training evidence is unavailable |
+| `checkpoint_overdue` | A scheduled checkpoint remains uncommitted after training reaches its save iteration and grace expires |
 | `restart_budget_low` | Generation is near `--max-restarts` |
 | `spares_exhausted` | No standby node and no queued spare left |
 | `suspect_node` | A node shared by consecutive short-lived cycles |
@@ -304,6 +305,37 @@ out — the failure that otherwise costs a night with nothing in any log.
 Only `orphaned_generation` acts, and only by releasing spares the job's own teardown
 would have released. Everything else reports. Disable any of them with
 `--disable name1,name2`.
+
+### Training and checkpoint progress
+
+The watcher reads the current cycle's Megatron iteration summaries incrementally.
+A higher completed-iteration count (iteration minus cumulative skipped iterations)
+resets the training stall timer. Repeated iteration lines, warning spam, log mtime
+changes, and save-start messages do not. A new cycle resets the iteration baseline,
+including after checkpoint rollback. The default stall threshold remains one hour.
+
+Without readable, recognized iteration evidence, checkpoint silence produces a
+warning that training progress is unavailable, not a confirmed critical stall.
+Other application log formats need a progress parser before this detector can
+confirm a training stall. File rotation, truncation, and an unreadable/oversized gap
+are handled conservatively; incomplete evidence is reported as unavailable.
+
+Read budgets are configurable in JSON/environment: `progress_read_bytes` (2 MiB per
+pass) and `progress_header_bytes` (512 KiB once per log identity, for save-interval
+metadata). When the unread backlog exceeds the budget, the reader samples the tail.
+Only complete lines are parsed, and the cursor/progress survives cron passes.
+Application timestamps use the watcher's local timezone by default; set
+`application_log_timezone` (for example `America/Los_Angeles`) if it differs from
+the application's timezone. Progress records from before the cycle or in the future
+are rejected.
+
+`checkpoint_overdue` independently warns when training has reached the next save
+iteration but the checkpoint marker has not advanced. It requires a recognized
+`save_interval` and checkpoint/load baseline; it does not guess a cadence when those
+are unavailable. Grace is the maximum of `checkpoint_grace_seconds` (default 600),
+three times the last measured save duration, and ten times the observed iteration
+duration. A save-start message does not extend that deadline. Checkpoint completion
+clears it even when the same training cycle continues.
 
 ## Reporting sinks
 
