@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from typing import Any
 
 ENV_PREFIX = "NVRX_WATCH_"
@@ -37,6 +37,7 @@ class Config:
     platform: str = "slurm"  # "slurm" or "none" (cycle-info-only mode)
     max_restarts: int | None = None  # ft_launcher --max-restarts, for restart_budget_low
     discover_users: tuple[str, ...] = ()  # opt-in multi-chain discovery; one user per query
+    discovery_job_name_prefixes: dict[str, str] = field(default_factory=dict)
     discovery_interval: float = 600.0  # minimum seconds between queries for a user
     discovery_retry_seconds: float = 3600.0  # retry unreadable/unresolved batch scripts
     discovery_retire_seconds: float = 1200.0  # grace after a successful empty observation
@@ -92,6 +93,14 @@ class Config:
     disable: tuple[str, ...] = ()  # detector names to skip
 
     def __post_init__(self) -> None:
+        if not isinstance(self.discovery_job_name_prefixes, dict) or any(
+            not isinstance(user, str)
+            or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", user)
+            or not isinstance(prefix, str)
+            or not prefix
+            for user, prefix in self.discovery_job_name_prefixes.items()
+        ):
+            raise ValueError("discovery_job_name_prefixes must map users to nonempty strings")
         if self.progress_read_bytes < 1024 or self.progress_header_bytes < 1024:
             raise ValueError("progress read budgets must be at least 1024 bytes")
         if self.checkpoint_grace_seconds <= 0:
@@ -154,6 +163,8 @@ class Config:
 
 
 def _coerce(name: str, raw: str, current: Any) -> Any:
+    if name == "discovery_job_name_prefixes":
+        return json.loads(raw)
     if name in ("disable", "discover_users", "cycle_job_ids"):
         return tuple(d.strip() for d in raw.split(",") if d.strip())
     if isinstance(current, bool):

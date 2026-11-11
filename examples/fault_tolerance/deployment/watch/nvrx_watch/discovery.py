@@ -38,7 +38,13 @@ from pathlib import Path
 
 from . import accounting_notice, discovery_notice, parsing, runner, sinks
 from .config import Config
-from .platform import NullPlatform, PlatformError, SlurmPlatform, _parse_slurm_time, accounting_details
+from .platform import (
+    NullPlatform,
+    PlatformError,
+    SlurmPlatform,
+    _parse_slurm_time,
+    accounting_details,
+)
 from .types import WARNING, ChainGeneration, Finding, TaskInfo
 
 logger = logging.getLogger("nvrx_watch")
@@ -121,7 +127,11 @@ def _tasks(raw: str) -> list[int]:
     return tasks
 
 
-def queue_snapshot(platform: SlurmPlatform, user: str) -> dict:
+def _name_matches(config: Config, user: str, name: str) -> bool:
+    return name.startswith(config.discovery_job_name_prefixes.get(user, ""))
+
+
+def queue_snapshot(platform: SlurmPlatform, user: str, name_prefix: str = "") -> dict:
     # Comment is last, so pipes inside JSON values are preserved by split(maxsplit).
     # No -r: pending arrays remain compact; expand only tagged candidates locally.
     output = platform._run(
@@ -145,7 +155,7 @@ def queue_snapshot(platform: SlurmPlatform, user: str) -> dict:
         jid, indexes, owner, name, state, command, workdir, comment = (x.strip() for x in fields)
         if owner != user or not jid.isdecimal():
             raise PlatformError("unexpected owner or array id in discovery snapshot")
-        if not injob_marker(comment):
+        if not name.startswith(name_prefix) or not injob_marker(comment):
             continue
         tasks = _tasks(indexes)
         if not tasks:
@@ -231,7 +241,7 @@ def _warning(key: str, message: str) -> Finding:
 def _refresh(config, registry, user, platform, now):
     entry = registry["users"][user]
     try:
-        arrays = queue_snapshot(platform, user)
+        arrays = queue_snapshot(platform, user, config.discovery_job_name_prefixes.get(user, ""))
     except PlatformError as exc:
         entry["failures"] = min(entry.get("failures", 0) + 1, 4)
         entry["next_query"] = now + config.discovery_interval * 2 ** entry["failures"]
@@ -259,6 +269,8 @@ def _register(config, registry, now):
         for jid in set(cache) - set(arrays):
             del cache[jid]
         for jid, row in sorted(arrays.items(), key=lambda item: int(item[0])):
+            if not _name_matches(config, user, row["name"]):
+                continue
             prior = cache.get(jid, {})
             signature = [row["name"], row["command"], row["workdir"]]
             if prior.get("signature") != signature:
@@ -311,7 +323,7 @@ def _accounting(config, registry, user, platform, now):
     terminal = entry.setdefault("terminal", {})
     wanted = set()
     for chain in registry["chains"].values():
-        if chain["user"] != user:
+        if chain["user"] != user or not _name_matches(config, user, chain["name"]):
             continue
         for jid in chain["ids"]:
             tasks = entry["arrays"].get(jid, {}).get("tasks", {})
@@ -358,8 +370,13 @@ def _accounting(config, registry, user, platform, now):
             state = parts[1].strip().split()[0] if parts[1].strip() else ""
             end = _parse_slurm_time(parts[2])
             if state and not TaskInfo(0, state).is_live and end:
-                terminal[jid] = dict(state=state, end=end.isoformat(), code=parts[3].split(":")[0],
-                                     raw_state=parts[1].strip(), raw_exit_code=parts[3].strip())
+                terminal[jid] = dict(
+                    state=state,
+                    end=end.isoformat(),
+                    code=parts[3].split(":")[0],
+                    raw_state=parts[1].strip(),
+                    raw_exit_code=parts[3].strip(),
+                )
         missing = wanted - set(terminal)
         entry["accounting_missing"] = sorted(missing, key=int)
         entry["accounting_error"] = (
@@ -406,7 +423,9 @@ class CachedPlatform(NullPlatform):
             raw["state"],
             int(raw["code"]) if raw["code"].isdigit() else None,
             datetime.fromisoformat(raw["end"]),
-            **accounting_details(raw.get("raw_state", raw["state"]), raw.get("raw_exit_code", raw["code"])),
+            **accounting_details(
+                raw.get("raw_state", raw["state"]), raw.get("raw_exit_code", raw["code"])
+            ),
         )
 
     @property
@@ -498,7 +517,7 @@ def _pass(config, registry, now, save):
     )
     for key, chain in list(registry["chains"].items()):
         user = chain["user"]
-        if user not in config.discover_users:
+        if user not in config.discover_users or not _name_matches(config, user, chain["name"]):
             continue
         entry = users[user]
         known = set(chain["ids"]) & set(entry.get("arrays", {}))

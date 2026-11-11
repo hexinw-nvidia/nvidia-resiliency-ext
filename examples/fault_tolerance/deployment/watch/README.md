@@ -153,6 +153,13 @@ and `--interval`. It reuses the normal alert configuration and detectors. For ex
 }
 ```
 
+To restrict selected users to job names beginning with a literal, case-sensitive prefix,
+add `"discovery_job_name_prefixes": {"another_user": "nemotron4_"}` to the JSON config.
+Users absent from this mapping retain unrestricted job-name discovery. This also applies
+to cached candidates and existing chains: excluded chains retain their state but are
+not checked or alerted until the filter allows them again. It adds no scheduler queries
+and does not replace the admission requirements below.
+
 Admission requires both:
 
 1. The live job comment parses as JSON with **`APS.nvrx == "enabled"`**. Whitespace,

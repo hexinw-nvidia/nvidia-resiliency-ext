@@ -189,6 +189,60 @@ def test_compact_array_states_and_comment_pipe(harness):
     assert len(tasks) == 6 and tasks["5"] == "PENDING"
 
 
+def test_name_prefix_is_literal_and_scoped_to_one_user(harness):
+    h = harness
+    cfg = h.config(discovery_job_name_prefixes={"alice": "train_"})
+    h.queues["alice"] = (
+        h.row(name="train_mid")
+        + h.row(jid="101", name="pretrain_mid")
+        + h.row(jid="102", name="train")
+        + h.row(jid="103", name="Train_mid")
+    )
+    h.queues["bob"] = h.row(user="bob", jid="200", name="other")
+    assert h.run(cfg) == 0
+    assert set(h.registry()["users"]["alice"]["arrays"]) == {"100"}
+    h.now += 600
+    assert h.run(cfg) == 0
+    assert {(c["user"], c["name"]) for c in h.registry()["chains"].values()} == {
+        ("alice", "train_mid"),
+        ("bob", "other"),
+    }
+    assert len(h.calls) == 2  # filtering adds no scheduler RPCs
+
+
+def test_new_prefix_applies_to_cached_arrays_and_existing_chains(harness, monkeypatch):
+    h = harness
+    h.queues["alice"] = h.row(name="other")
+    assert h.run() == 0
+    reg = h.registry()
+    reg["users"]["alice"]["metadata"] = {}
+    (Path(h.config().state_dir) / "discovery.json").write_text(json.dumps(reg))
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("excluded cached job must not be resolved or monitored")
+
+    monkeypatch.setattr(discovery, "resolve_metadata", unexpected)
+    monkeypatch.setattr(discovery.runner, "run_once", unexpected)
+    h.now += 1  # no fresh queue query is due
+    assert h.run(h.config(discovery_job_name_prefixes={"alice": "train_"})) == 0
+    assert len(h.calls) == 1
+    assert h.registry()["chains"] == reg["chains"]  # keep state for later re-enrollment
+
+
+@pytest.mark.parametrize("prefixes", [[], "train_", {"alice": ""}, {"alice": ["train_"]}])
+def test_invalid_name_prefix_mapping_is_rejected(prefixes):
+    with pytest.raises(ValueError, match="discovery_job_name_prefixes"):
+        Config(discovery_job_name_prefixes=prefixes)
+
+
+def test_name_prefix_config_and_environment(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"discovery_job_name_prefixes": {"alice": "first_"}}))
+    assert load(str(path), env={}).discovery_job_name_prefixes == {"alice": "first_"}
+    cfg = load(str(path), env={"NVRX_WATCH_DISCOVERY_JOB_NAME_PREFIXES": '{"bob":"next_"}'})
+    assert cfg.discovery_job_name_prefixes == {"bob": "next_"}
+
+
 @pytest.mark.parametrize("bad", ["0-999999999", "1-5...", "5-1", "1-3:0"])
 def test_bad_ranges_are_not_empty_success(bad):
     with pytest.raises(PlatformError):
