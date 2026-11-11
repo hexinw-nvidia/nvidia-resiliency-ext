@@ -6,6 +6,7 @@ import io
 import json
 import sys
 import urllib.error
+import urllib.parse
 from dataclasses import replace
 from pathlib import Path
 
@@ -161,3 +162,23 @@ def test_slack_success_and_private_token_permissions(setup, tmp_path, monkeypatc
     Path(config.slack_bot_token_file).chmod(0o644)
     with pytest.raises(ValueError):
         slack_threads.post_parent(config, ev)
+
+
+@pytest.mark.parametrize(
+    "method", ["conversations.history", "conversations.replies", "chat.getPermalink"]
+)
+def test_slack_reads_use_get_and_keep_token_out_of_url(setup, tmp_path, monkeypatch, method):
+    config, _, _ = setup
+    config = enable(config, tmp_path)
+
+    def response(req, **kwargs):
+        assert req.get_method() == "GET"
+        assert req.data is None and "secret" not in req.full_url
+        assert urllib.parse.parse_qs(urllib.parse.urlsplit(req.full_url).query) == {
+            "cursor": ["page+/="]
+        }
+        assert kwargs["timeout"] == 5
+        return io.BytesIO(b'{"ok":true}')
+
+    monkeypatch.setattr(slack_threads.urllib.request, "urlopen", response)
+    assert slack_threads.api_call(config, method, {"cursor": "page+/="}, timeout=5)["ok"]

@@ -374,6 +374,33 @@ With the local analysis outbox enabled, `slack_bot_token_file` and
 contain a bot token with `chat:write`; invite the bot to the target channel.
 The token is read only by the watcher, never copied into event payloads.
 
+#### Links to restart-agent alerts
+
+Set `"restart_agent_slack_channel_id": "C_SOURCE_CHANNEL"` in the watcher JSON to
+link matching attribution alerts into the existing watcher thread. This source
+must differ from `slack_channel_id`. Invite the watcher bot to the restart-agent
+channel and grant `channels:history` (or `groups:history` for a private channel),
+in addition to its existing `chat:write`. It reads source history and posts only
+in the watcher channel; it does not post in the restart-agent channel.
+
+The linker requires matching job ID, cycle, owner, and exact full cycle-log path.
+The path distinguishes attempts and run timestamps. Ambiguous or incomplete
+matches are left pending. There are no additional Slurm or model calls: the
+existing cron makes at most one shared history request (100 messages per page)
+and delivers at most one link per pass, with five-second HTTP timeouts. A durable
+cursor covers busy channels across passes; the initial history window is 24 hours.
+The index retains at most 2,000 parsed attribution parents for seven days. Pending
+events are checked in rotating batches of 100 (at most 10,000 filenames listed).
+
+New startup and restart parents enqueue link intents; existing threads are not
+automatically replayed. The linker waits for attribution alerts that arrive later,
+and expires unmatched intents after seven days. `restart-link-pending/`,
+`restart-link-receipts/`, and `restart-link-index.json` live beside parent receipts.
+Before posting, it checks the watcher thread for an existing manual or automatic
+link, including enterprise Slack URLs. A thread exceeding one page (100 replies)
+is left pending rather than risking a duplicate. Rate limits and permission
+failures are retried without interrupting core monitoring or diagnosis delivery.
+
 The watcher posts each event's parent with `chat.postMessage`, persists its
 channel/timestamp under `slack-receipts/`, and retries failures from
 `slack-pending/`. It attempts at most one parent per pass (15-second HTTP timeout),

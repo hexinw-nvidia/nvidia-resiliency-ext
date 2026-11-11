@@ -9,6 +9,7 @@ import re
 import stat
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -49,20 +50,24 @@ class RetryLater(Exception):
         self.seconds = max(60, min(float(seconds), 86400))
 
 
-def api_call(config, method, payload):
+def api_call(config, method, payload, timeout=15):
     path = Path(config.slack_bot_token_file)
     if stat.S_IMODE(path.stat().st_mode) not in (0o400, 0o600):
         raise ValueError("Slack token file must have mode 400 or 600")
     token = path.read_text().strip()
     if not token.startswith("xoxb-") or any(c.isspace() for c in token):
         raise ValueError("expected a Slack bot token")
+    read = method in {"conversations.history", "conversations.replies", "chat.getPermalink"}
+    url = "https://slack.com/api/" + method
+    if read:
+        url += "?" + urllib.parse.urlencode(payload)
     request = urllib.request.Request(
-        "https://slack.com/api/" + method,
-        data=json.dumps(payload).encode(),
+        url,
+        data=None if read else json.dumps(payload).encode(),
         headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=15) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             value = json.load(response)
     except urllib.error.HTTPError as exc:
         if exc.code == 429:
@@ -126,7 +131,7 @@ def post_parent(config, event):
     }
 
 
-def flush(config):
+def _flush_parents(config):
     """Try one parent and one pending log-path update, independently of analysis.
 
     Requests are bounded; updates preserve the parent message and its thread.
@@ -137,7 +142,7 @@ def flush(config):
         return True
     queue = Path(config.event_queue_dir)
     pending = queue / "slack-pending"
-    from . import cycle_logs
+    from . import cycle_logs, restart_links
 
     if not pending.exists():
         return cycle_logs.flush(config)
@@ -156,7 +161,9 @@ def flush(config):
                 path = Path(entry.path)
                 receipt = queue / "slack-receipts" / entry.name
                 if receipt.exists():
-                    cycle_logs.enqueue(config, json.loads(path.read_text()))
+                    event = json.loads(path.read_text())
+                    cycle_logs.enqueue(config, event)
+                    restart_links.enqueue(config, event)
                     path.unlink()
                     continue
                 event = json.loads(path.read_text())
@@ -179,9 +186,20 @@ def flush(config):
                 return False
             atomic_json(receipt, value)
             cycle_logs.enqueue(config, event)
+            restart_links.enqueue(config, event)
             path.unlink()
             return cycle_logs.flush(config, event["event_id"])
         return cycle_logs.flush(config)
     except Exception as exc:
         LOG.warning("Slack parent delivery pending (%s)", type(exc).__name__)
         return False
+
+
+def flush(config):
+    result = _flush_parents(config)
+    # Cross-channel links are supplementary: unavailable history must not prevent
+    # recovery alerts, diagnosis/validation replies, or the normal heartbeat.
+    from . import restart_links
+
+    restart_links.flush(config)
+    return result

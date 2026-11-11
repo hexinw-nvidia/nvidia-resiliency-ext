@@ -87,6 +87,7 @@ class Config:
     webhook_url: str = ""
     slack_bot_token_file: str = ""
     slack_channel_id: str = ""
+    restart_agent_slack_channel_id: str = ""  # read attribution parents; link into watcher threads
     log_file: str = ""  # default <state_dir>/watch.log
 
     # --- detector selection --------------------------------------------------------
@@ -118,6 +119,13 @@ class Config:
                 raise ValueError("Slack threads require event_queue_dir and an absolute token path")
             if not re.fullmatch(r"[CG][A-Z0-9]+", self.slack_channel_id):
                 raise ValueError("invalid Slack channel ID")
+        if self.restart_agent_slack_channel_id:
+            if not self.slack_bot_token_file or not re.fullmatch(
+                r"[CG][A-Z0-9]+", self.restart_agent_slack_channel_id
+            ):
+                raise ValueError("restart-agent links require Slack bot delivery and a channel ID")
+            if self.restart_agent_slack_channel_id == self.slack_channel_id:
+                raise ValueError("restart-agent source and watcher destination must differ")
         home = os.path.expanduser("~")
         self.state_dir = self.state_dir or os.path.join(home, ".nvrx_watch")
         self.expect_file = self.expect_file or os.path.join(home, ".nvrx_watch_expect_chain")
