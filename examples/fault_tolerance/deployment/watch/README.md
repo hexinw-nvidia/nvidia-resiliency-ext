@@ -389,7 +389,11 @@ The exact source parent is read again before posting, and its identity is rechec
 an edited verdict is shown as it currently appears. Mentions in the excerpt are
 escaped. Existing manual links continue to suppress duplicate replies.
 
-The linker requires matching job ID, cycle, owner, and exact full cycle-log path.
+For restart parents, the linker uses the event's recorded **previous cycle**:
+the verdict for failed cycle 2 belongs in the thread announcing recovery cycle 3.
+The reply explicitly labels both cycles. Startup parents retain their own cycle.
+A missing predecessor remains pending; it never falls back to the successor.
+The linker requires matching job ID, selected cycle, owner, and exact full log path.
 The path distinguishes attempts and run timestamps. Ambiguous or incomplete
 matches are left pending. There are no additional Slurm or model calls: the
 existing cron makes at most one shared history request (100 messages per page)

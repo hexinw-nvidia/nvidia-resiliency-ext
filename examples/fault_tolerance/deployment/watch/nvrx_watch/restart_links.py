@@ -22,6 +22,14 @@ LOG = logging.getLogger("nvrx_watch")
 RETENTION = 7 * 86400
 
 
+def _attribution_cycle(event):
+    # A restart parent announces the successor, while attribution explains the
+    # failed predecessor. Use its recorded identity; do not guess cycle N - 1.
+    if event.get("kind") == "cycle_restart":
+        return event.get("previous_cycle")
+    return event.get("cycle")
+
+
 def enqueue(config, event):
     if config.dry_run or not config.restart_agent_slack_channel_id:
         return
@@ -162,6 +170,18 @@ def _preview(config, source, api):
     return verdict, preview
 
 
+def _render_reply(event, preview, permalink):
+    if event.get("kind") == "cycle_restart":
+        failed, resumed = _attribution_cycle(event), event.get("cycle")
+        if failed and resumed:
+            header, separator, reason = preview.partition("\n")
+            preview = (
+                header + f"\nFailed cycle {failed['cycle_number']} → "
+                f"recovery cycle {resumed['cycle_number']}" + separator + reason
+            )
+    return preview + f"\n<{permalink}|Restart-agent attribution and analysis thread>"
+
+
 def _link(config, event, parent, source, api):
     """Check manual/lost-response duplicates before posting in the watcher thread."""
     channel, ts = config.restart_agent_slack_channel_id, source["ts"]
@@ -183,7 +203,7 @@ def _link(config, event, parent, source, api):
     if replies.get("has_more") or replies.get("response_metadata", {}).get("next_cursor"):
         raise ValueError("watcher thread exceeds duplicate-check page bound")
     verdict, preview = _preview(config, source, api)
-    text = preview + f"\n<{permalink}|Restart-agent attribution and analysis thread>"
+    text = _render_reply(event, preview, permalink)
     value = api(
         "chat.postMessage",
         {
@@ -266,7 +286,9 @@ def flush(config):
                 or not re.fullmatch(r"[0-9]+\.[0-9]+", str(parent.get("thread_ts", "")))
             ):
                 raise ValueError("invalid watcher parent identity for restart link")
-            cycle = event["cycle"]
+            cycle = _attribution_cycle(event)
+            if not cycle:
+                continue  # Missing predecessor is not permission to match the successor.
             log = cycle.get("log_file")
             if not log:
                 from .cycle_logs import _log_path

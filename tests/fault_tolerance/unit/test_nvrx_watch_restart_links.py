@@ -40,6 +40,12 @@ def bridge(tmp_path, monkeypatch):
             "cycle": {
                 "job_id": "100",
                 "attempt_index": 0,
+                "cycle_number": 5,
+                "log_file": "/run/train_100_date_start_cycle5.log",
+            },
+            "previous_cycle": {
+                "job_id": "100",
+                "attempt_index": 0,
                 "cycle_number": 4,
                 "log_file": "/run/train_100_date_start_cycle4.log",
             },
@@ -52,7 +58,7 @@ def bridge(tmp_path, monkeypatch):
                 "text": (
                     "*NVRx attribution:* `STOP`\n"
                     f"*Job ID:* `{job}` | *Cycle:* {cycle} | *Owner:* `{owner}`\n"
-                    "*Log path:*\n```" + (path or self.event["cycle"]["log_file"]) + "```"
+                    "*Log path:*\n```" + (path or self.event["previous_cycle"]["log_file"]) + "```"
                 ),
             }
 
@@ -97,6 +103,7 @@ def test_exact_match_links_into_watcher_thread_and_deduplicates(bridge):
     assert len(posts) == 1
     assert posts[0]["channel"] == "CWATCH" and posts[0]["thread_ts"] == "100.123"
     assert "https://team.slack.com/archives/CAGENT/p101123" in posts[0]["text"]
+    assert "Failed cycle 4 → recovery cycle 5" in posts[0]["text"]
     assert all(p.get("channel") != "CAGENT" for m, p in b.calls if m == "chat.postMessage")
     b.enqueue()  # Replay after a crash between receipt save and pending removal.
     b.now += 180
@@ -286,7 +293,7 @@ def test_pending_rotation_does_not_starve_new_matches(bridge):
         b.event = {
             **original_event,
             "event_id": event_id,
-            "cycle": {**original_event["cycle"], "log_file": f"/other/log{i}"},
+            "previous_cycle": {**original_event["previous_cycle"], "log_file": f"/other/log{i}"},
         }
         b.parent = {**original_parent, "event_id": event_id}
         b.enqueue()
@@ -379,3 +386,75 @@ def test_verdict_without_reason_does_not_invent_a_reason(bridge):
     text = next(p["text"] for m, p in b.calls if m == "chat.postMessage")
     assert "*Restart-agent verdict: STOP*" in text
     assert "> " not in text
+
+
+def test_late_predecessor_verdict_returns_to_the_original_recovery_thread(bridge):
+    b = bridge
+    b.enqueue()
+    restart_links.flush(b.config)
+    b.now += 20 * 60  # Diagnosis finishes well after the restart announcement.
+    restart_links.flush(b.config)
+    pending = (
+        Path(b.config.event_queue_dir) / "restart-link-pending" / (b.event["event_id"] + ".json")
+    )
+    assert pending.exists() and not any(m == "chat.postMessage" for m, _ in b.calls)
+    b.now += 180
+    b.messages = [b.message()]
+    restart_links.flush(b.config)
+    posts = [p for m, p in b.calls if m == "chat.postMessage"]
+    assert len(posts) == 1 and posts[0]["thread_ts"] == b.parent["thread_ts"]
+    assert "Failed cycle 4 → recovery cycle 5" in posts[0]["text"]
+    assert not pending.exists()
+    b.now += 180
+    restart_links.flush(b.config)
+    assert sum(m == "chat.postMessage" for m, _ in b.calls) == 1
+
+
+def test_source_can_be_indexed_before_the_recovery_parent_exists(bridge):
+    b = bridge
+    original_event, original_parent = b.event, b.parent
+    b.messages = [b.message()]
+    b.event = {
+        **original_event,
+        "previous_cycle": {**original_event["previous_cycle"], "log_file": "/unrelated/log"},
+    }
+    b.enqueue()
+    restart_links.flush(b.config)  # Index the verdict while another event is pending.
+    assert not any(m == "chat.postMessage" for m, _ in b.calls)
+    b.event = {**original_event, "event_id": "b" * 64}
+    b.parent = {**original_parent, "event_id": "b" * 64, "thread_ts": "200.123"}
+    b.enqueue()
+    b.messages = []
+    b.now += 180
+    restart_links.flush(b.config)
+    post = next(p for m, p in b.calls if m == "chat.postMessage")
+    assert post["thread_ts"] == "200.123"
+
+
+def test_successor_log_cannot_match_a_predecessor_failure(bridge):
+    b = bridge
+    b.messages = [b.message(cycle=5, path=b.event["cycle"]["log_file"])]
+    b.enqueue()
+    restart_links.flush(b.config)
+    assert not any(m == "chat.postMessage" for m, _ in b.calls)
+
+
+def test_missing_predecessor_does_not_fall_back_to_successor(bridge):
+    b = bridge
+    b.messages = [b.message(cycle=5, path=b.event["cycle"]["log_file"])]
+    b.event = {k: v for k, v in b.event.items() if k != "previous_cycle"}
+    b.enqueue()
+    restart_links.flush(b.config)
+    assert not any(m == "chat.postMessage" for m, _ in b.calls)
+
+
+def test_startup_event_keeps_its_own_cycle_identity(bridge):
+    b = bridge
+    message = b.message(cycle=5, path=b.event["cycle"]["log_file"])
+    b.event = {**b.event, "kind": "job_started", "previous_cycle": None}
+    b.messages = [message]
+    b.source_message = message
+    b.enqueue()
+    restart_links.flush(b.config)
+    post = next(p for m, p in b.calls if m == "chat.postMessage")
+    assert "Failed cycle" not in post["text"]
