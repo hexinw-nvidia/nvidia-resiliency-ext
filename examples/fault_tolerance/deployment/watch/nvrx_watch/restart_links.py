@@ -73,8 +73,10 @@ def _history(config, state, now, api):
     payload = dict(
         channel=config.restart_agent_slack_channel_id,
         limit=100,
-        oldest=str(window["oldest"]),
-        latest=str(window.get("latest", window["until"])),
+        # Slack timestamps are seconds.microseconds. More fractional digits can
+        # silently produce an empty page rather than an invalid-argument error.
+        oldest=f"{float(window['oldest']):.6f}",
+        latest=f"{float(window.get('latest', window['until'])):.6f}",
     )
     if window.get("cursor"):
         payload["cursor"] = window["cursor"]

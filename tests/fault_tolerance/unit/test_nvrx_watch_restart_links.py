@@ -3,6 +3,7 @@
 """Link independently posted attribution alerts to the exact watcher cycle thread."""
 
 import json
+import re
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -312,3 +313,13 @@ def test_cursor_is_restarted_after_an_outage(bridge):
     assert history[1]["cursor"] == "expires" and "cursor" not in history[2]
     assert history[0]["oldest"] == history[2]["oldest"]
     assert any(m == "chat.postMessage" for m, _ in b.calls)
+
+
+def test_history_timestamps_have_exactly_microsecond_precision(bridge):
+    b = bridge
+    b.now = 100000.1234567
+    b.enqueue()
+    restart_links.flush(b.config)
+    params = next(p for m, p in b.calls if m == "conversations.history")
+    assert re.fullmatch(r"\d+\.\d{6}", params["oldest"])
+    assert re.fullmatch(r"\d+\.\d{6}", params["latest"])
