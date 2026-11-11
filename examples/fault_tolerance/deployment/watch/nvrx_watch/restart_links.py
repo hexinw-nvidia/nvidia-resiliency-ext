@@ -125,6 +125,43 @@ def _history(config, state, now, api):
     save()
 
 
+def _preview(config, source, api):
+    """Read the exact current parent rather than inventing a verdict from a link."""
+    result = api(
+        "conversations.history",
+        dict(
+            channel=config.restart_agent_slack_channel_id,
+            oldest=source["ts"],
+            latest=source["ts"],
+            inclusive="true",
+            limit=1,
+        ),
+    )
+    messages = [m for m in result.get("messages", []) if m.get("ts") == source["ts"]]
+    if len(messages) != 1:
+        raise ValueError("attribution parent unavailable for preview")
+    current = _parse(messages[0])
+    fields = ("ts", "job", "cycle", "owner", "log")
+    if current is None or any(current[key] != source[key] for key in fields):
+        raise ValueError("attribution parent identity changed before preview")
+    text = messages[0]["text"]
+    verdict = re.match(r"^\*NVRx attribution:\*\s*`(STOP|RESTART|CONTINUE|UNKNOWN|TIMEOUT)`", text)
+    if not verdict:
+        raise ValueError("attribution verdict unavailable for preview")
+    verdict = verdict[1]
+    preview = f"*Restart-agent verdict: {verdict}*"
+    reason = re.search(r"(?m)^\*Why " + verdict + r":\*[ \t]*(.*)$", text)
+    if reason:
+        reason = " ".join(html.unescape(reason[1]).replace("`", "").split())
+        if len(reason) > 300:
+            reason = reason[:299] + "…"
+        if reason:
+            # Source prose must not turn into another channel/user notification.
+            reason = reason.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            preview += "\n> " + reason
+    return verdict, preview
+
+
 def _link(config, event, parent, source, api):
     """Check manual/lost-response duplicates before posting in the watcher thread."""
     channel, ts = config.restart_agent_slack_channel_id, source["ts"]
@@ -145,12 +182,14 @@ def _link(config, event, parent, source, api):
         return dict(source_channel=channel, source_ts=ts, permalink=permalink, existing=True)
     if replies.get("has_more") or replies.get("response_metadata", {}).get("next_cursor"):
         raise ValueError("watcher thread exceeds duplicate-check page bound")
+    verdict, preview = _preview(config, source, api)
+    text = preview + f"\n<{permalink}|Restart-agent attribution and analysis thread>"
     value = api(
         "chat.postMessage",
         {
             "channel": parent["channel"],
             "thread_ts": parent["thread_ts"],
-            "text": f"<{permalink}|Restart-agent attribution and analysis thread>",
+            "text": text,
             "unfurl_links": False,
             "unfurl_media": False,
             "client_msg_id": str(uuid.uuid5(uuid.NAMESPACE_URL, event["event_id"] + ":" + ts)),
@@ -160,7 +199,14 @@ def _link(config, event, parent, source, api):
         r"[0-9]+\.[0-9]+", str(value.get("ts", ""))
     ):
         raise ValueError("invalid restart-link receipt")
-    return dict(source_channel=channel, source_ts=ts, permalink=permalink, reply_ts=value["ts"])
+    return dict(
+        source_channel=channel,
+        source_ts=ts,
+        permalink=permalink,
+        reply_ts=value["ts"],
+        verdict=verdict,
+        text=text,
+    )
 
 
 def flush(config):

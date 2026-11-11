@@ -383,11 +383,18 @@ channel and grant `channels:history` (or `groups:history` for a private channel)
 in addition to its existing `chat:write`. It reads source history and posts only
 in the watcher channel; it does not post in the restart-agent channel.
 
+Replies show the source's explicit **STOP/RESTART** (or other supported) verdict,
+up to 300 characters of its `Why` line when present, and a link to the full thread.
+The exact source parent is read again before posting, and its identity is rechecked;
+an edited verdict is shown as it currently appears. Mentions in the excerpt are
+escaped. Existing manual links continue to suppress duplicate replies.
+
 The linker requires matching job ID, cycle, owner, and exact full cycle-log path.
 The path distinguishes attempts and run timestamps. Ambiguous or incomplete
 matches are left pending. There are no additional Slurm or model calls: the
 existing cron makes at most one shared history request (100 messages per page)
-and delivers at most one link per pass, with five-second HTTP timeouts. A durable
+plus one exact-message lookup for a new preview, and delivers at most one link per
+pass, with five-second HTTP timeouts. A durable
 cursor covers busy channels across passes; the initial history window is 24 hours.
 The index retains at most 2,000 parsed attribution parents for seven days. Pending
 events are checked in rotating batches of 100 (at most 10,000 filenames listed).

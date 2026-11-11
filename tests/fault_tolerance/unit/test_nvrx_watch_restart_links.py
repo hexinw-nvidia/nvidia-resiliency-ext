@@ -25,6 +25,7 @@ def bridge(tmp_path, monkeypatch):
         messages = []
         replies = []
         history = None
+        source_message = None
         post_error = None
         config = Config(
             event_queue_dir=str(tmp_path),
@@ -66,6 +67,8 @@ def bridge(tmp_path, monkeypatch):
     def api(config, method, payload, **kwargs):
         b.calls.append((method, payload))
         if method == "conversations.history":
+            if payload.get("inclusive") == "true":
+                return {"messages": [b.source_message or b.message()]}
             if isinstance(b.history, Exception):
                 raise b.history
             return b.history or {"messages": b.messages, "has_more": False}
@@ -155,7 +158,7 @@ def test_delayed_source_and_persistent_history_cursor(bridge):
     assert any(m == "chat.postMessage" for m, _ in b.calls)
 
 
-def test_one_history_query_and_one_link_per_pass_for_multiple_events(bridge):
+def test_one_shared_history_query_and_one_link_per_pass_for_multiple_events(bridge):
     b = bridge
     b.enqueue()
     b.event = {**b.event, "event_id": "b" * 64}
@@ -163,7 +166,8 @@ def test_one_history_query_and_one_link_per_pass_for_multiple_events(bridge):
     b.enqueue()
     b.messages = [b.message()]
     restart_links.flush(b.config)
-    assert sum(m == "conversations.history" for m, _ in b.calls) == 1
+    assert sum(m == "conversations.history" and "inclusive" not in p for m, p in b.calls) == 1
+    assert sum(m == "conversations.history" and "inclusive" in p for m, p in b.calls) == 1
     assert sum(m == "chat.postMessage" for m, _ in b.calls) == 1
 
 
@@ -323,3 +327,55 @@ def test_history_timestamps_have_exactly_microsecond_precision(bridge):
     params = next(p for m, p in b.calls if m == "conversations.history")
     assert re.fullmatch(r"\d+\.\d{6}", params["oldest"])
     assert re.fullmatch(r"\d+\.\d{6}", params["latest"])
+
+
+@pytest.mark.parametrize("verdict", ["STOP", "RESTART"])
+def test_reply_includes_explicit_source_verdict_and_short_reason(bridge, verdict):
+    b = bridge
+    message = b.message()
+    message["text"] = message["text"].replace("`STOP`", f"`{verdict}`")
+    message["text"] += f"\n*Why {verdict}:* retry budget exhausted"
+    b.messages = [message]
+    b.source_message = message
+    b.enqueue()
+    restart_links.flush(b.config)
+    post = next(p for m, p in b.calls if m == "chat.postMessage")
+    assert f"*Restart-agent verdict: {verdict}*" in post["text"]
+    assert "> retry budget exhausted" in post["text"]
+    assert "https://team.slack.com/archives/CAGENT/p101123" in post["text"]
+
+
+def test_preview_uses_latest_source_verdict_and_escapes_mentions(bridge):
+    b = bridge
+    b.messages = [b.message()]
+    updated = b.message()
+    updated["text"] = updated["text"].replace("`STOP`", "`RESTART`")
+    updated["text"] += "\n*Why RESTART:* recovered <@U123> <!channel> & " + "x" * 600
+    b.source_message = updated
+    b.enqueue()
+    restart_links.flush(b.config)
+    text = next(p["text"] for m, p in b.calls if m == "chat.postMessage")
+    assert "*Restart-agent verdict: RESTART*" in text
+    assert "*Restart-agent verdict: STOP*" not in text
+    assert "<@U123>" not in text and "<!channel>" not in text
+    assert "&lt;@U123&gt;" in text and "&amp;" in text
+    assert len(text) < 550
+
+
+def test_source_changed_to_another_cycle_is_not_forwarded(bridge):
+    b = bridge
+    b.messages = [b.message()]
+    b.source_message = b.message(cycle=5)
+    b.enqueue()
+    restart_links.flush(b.config)
+    assert not any(m == "chat.postMessage" for m, _ in b.calls)
+
+
+def test_verdict_without_reason_does_not_invent_a_reason(bridge):
+    b = bridge
+    b.messages = [b.message()]
+    b.enqueue()
+    restart_links.flush(b.config)
+    text = next(p["text"] for m, p in b.calls if m == "chat.postMessage")
+    assert "*Restart-agent verdict: STOP*" in text
+    assert "> " not in text
